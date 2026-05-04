@@ -51,6 +51,7 @@ type RecurringBill = {
   due_day: number;
   category: string;
   is_paid: boolean;
+  counts_toward_available_cash?: boolean | null;
 };
 
 type NetWorthSnapshot = {
@@ -67,6 +68,14 @@ type BudgetAssignmentRow = {
 };
 
 type PayScheduleType = "weekly" | "biweekly" | "twice_monthly" | "monthly";
+
+type PaycheckSettingsRow = {
+  schedule_type: PayScheduleType;
+  anchor_date: string | null;
+  monthly_day: number | null;
+  first_twice_monthly_day: number | null;
+  second_twice_monthly_day: number | null;
+};
 
 type PaycheckSettings = {
   type: PayScheduleType;
@@ -426,15 +435,15 @@ const DEFAULT_CATEGORIES = [
 ];
 
 const DEFAULT_BILLS = [
-  { name: "Rent", amount: 1495, due_day: 31, category: "Rent" },
-  { name: "Utilities", amount: 0, due_day: 31, category: "Utilities" },
-  { name: "TV, Phone and Internet", amount: 50, due_day: 23, category: "TV, Phone and Internet" },
-  { name: "Insurance", amount: 0, due_day: 31, category: "Insurance" },
-  { name: "Auto Loans", amount: 293, due_day: 11, category: "Auto Loans" },
-  { name: "Personal Loans", amount: 122.83, due_day: 19, category: "Personal Loans" },
-  { name: "Buy Now, Pay Later", amount: 577.64, due_day: 31, category: "Buy Now, Pay Later" },
-  { name: "Music", amount: 10.99, due_day: 18, category: "Music" },
-  { name: "Netflix and Disney Plus", amount: 33.54, due_day: 23, category: "Netflix and Disney Plus" },
+  { name: "Rent", amount: 1495, due_day: 31, category: "Rent", counts_toward_available_cash: true },
+  { name: "Utilities", amount: 0, due_day: 31, category: "Utilities", counts_toward_available_cash: true },
+  { name: "TV, Phone and Internet", amount: 50, due_day: 23, category: "TV, Phone and Internet", counts_toward_available_cash: true },
+  { name: "Insurance", amount: 0, due_day: 31, category: "Insurance", counts_toward_available_cash: true },
+  { name: "Auto Loans", amount: 293, due_day: 11, category: "Auto Loans", counts_toward_available_cash: false },
+  { name: "Personal Loans", amount: 122.83, due_day: 19, category: "Personal Loans", counts_toward_available_cash: false },
+  { name: "Buy Now, Pay Later", amount: 577.64, due_day: 31, category: "Buy Now, Pay Later", counts_toward_available_cash: false },
+  { name: "Music", amount: 10.99, due_day: 18, category: "Music", counts_toward_available_cash: true },
+  { name: "Netflix and Disney Plus", amount: 33.54, due_day: 23, category: "Netflix and Disney Plus", counts_toward_available_cash: true },
 ];
 
 const DEFAULT_MONTHLY_INCOME = 4056;
@@ -497,6 +506,10 @@ export default function Home() {
   const [newCategoryGroup, setNewCategoryGroup] = useState("Flexible");
   const [newCategoryWeeklyLimit, setNewCategoryWeeklyLimit] = useState("");
   const [newCategoryMonthlyLimit, setNewCategoryMonthlyLimit] = useState("");
+  const [newBillName, setNewBillName] = useState("");
+  const [newBillAmount, setNewBillAmount] = useState("");
+  const [newBillDueDay, setNewBillDueDay] = useState("");
+  const [newBillCategory, setNewBillCategory] = useState("Rent");
   const [newDebtName, setNewDebtName] = useState("");
   const [newDebtBalance, setNewDebtBalance] = useState("");
   const [newDebtInterest, setNewDebtInterest] = useState("");
@@ -509,6 +522,8 @@ export default function Home() {
   const [paycheckSettings, setPaycheckSettings] = useState<PaycheckSettings>(
     DEFAULT_PAYCHECK_SETTINGS
   );
+  const [paycheckSyncReady, setPaycheckSyncReady] = useState(false);
+  const [expandedDebts, setExpandedDebts] = useState<Record<string, boolean>>({});
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
@@ -587,6 +602,45 @@ export default function Home() {
     }
   };
 
+  const mapPaycheckSettingsRow = (row: PaycheckSettingsRow): PaycheckSettings => ({
+    type: row.schedule_type,
+    anchorDate: row.anchor_date || DEFAULT_PAYCHECK_SETTINGS.anchorDate,
+    monthlyDay: row.monthly_day ? String(row.monthly_day) : DEFAULT_PAYCHECK_SETTINGS.monthlyDay,
+    firstTwiceMonthlyDay: row.first_twice_monthly_day
+      ? String(row.first_twice_monthly_day)
+      : DEFAULT_PAYCHECK_SETTINGS.firstTwiceMonthlyDay,
+    secondTwiceMonthlyDay: row.second_twice_monthly_day
+      ? String(row.second_twice_monthly_day)
+      : DEFAULT_PAYCHECK_SETTINGS.secondTwiceMonthlyDay,
+  });
+
+  const savePaycheckSettings = async (settings = paycheckSettings) => {
+    if (!userId) return;
+
+    const payload = {
+      user_id: userId,
+      schedule_type: settings.type,
+      anchor_date: settings.anchorDate || null,
+      monthly_day: Number(settings.monthlyDay || 0) || null,
+      first_twice_monthly_day: Number(settings.firstTwiceMonthlyDay || 0) || null,
+      second_twice_monthly_day: Number(settings.secondTwiceMonthlyDay || 0) || null,
+    };
+
+    const { error } = await supabase
+      .from("paycheck_settings")
+      .upsert(payload, { onConflict: "user_id" });
+
+    if (error) {
+      logSupabaseError("Failed to save paycheck settings", error, {
+        userId,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    setSyncError(null);
+  };
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const storedIncome = window.localStorage.getItem("money-os:income");
@@ -660,7 +714,7 @@ export default function Home() {
       setUserId(uid);
 
       const monthKey = getCurrentMonthKey();
-      const [txRes, accountRes, categoryRes, debtRes, billRes, netWorthRes, assignmentRes] =
+      const [txRes, accountRes, categoryRes, debtRes, billRes, netWorthRes, assignmentRes, paycheckRes] =
         await Promise.all([
           supabase
             .from("transactions")
@@ -693,6 +747,12 @@ export default function Home() {
             .select("item_key, assigned")
             .eq("user_id", uid)
             .eq("month_key", monthKey),
+
+          supabase
+            .from("paycheck_settings")
+            .select("schedule_type, anchor_date, monthly_day, first_twice_monthly_day, second_twice_monthly_day")
+            .eq("user_id", uid)
+            .maybeSingle(),
         ]);
 
       const loadErrors = [
@@ -703,6 +763,7 @@ export default function Home() {
         billRes.error,
         netWorthRes.error,
         assignmentRes.error,
+        paycheckRes.error,
       ].filter(Boolean);
 
       if (loadErrors.length > 0) {
@@ -718,6 +779,7 @@ export default function Home() {
       setAccounts(accountRes.data || []);
       setCategories(categoryRes.data || []);
       setDebts(debtRes.data || []);
+      syncExpandedDebtState(debtRes.data || []);
       setBills(billRes.data || []);
       setNetWorth(netWorthRes.data || null);
 
@@ -751,6 +813,56 @@ export default function Home() {
       }
 
       setAssignmentSyncReady(true);
+
+      if (paycheckRes.data) {
+        setPaycheckSettings(
+          mapPaycheckSettingsRow(paycheckRes.data as PaycheckSettingsRow)
+        );
+      } else if (typeof window !== "undefined") {
+        try {
+          const storedSettings = window.localStorage.getItem(getPaycheckStorageKey(uid));
+
+          if (storedSettings) {
+            const parsed = JSON.parse(storedSettings) as Partial<PaycheckSettings>;
+            const nextSettings = {
+              ...DEFAULT_PAYCHECK_SETTINGS,
+              ...parsed,
+            };
+            setPaycheckSettings(nextSettings);
+            const { error: paycheckMigrationError } = await supabase
+              .from("paycheck_settings")
+              .upsert(
+                {
+                  user_id: uid,
+                  schedule_type: nextSettings.type,
+                  anchor_date: nextSettings.anchorDate || null,
+                  monthly_day: Number(nextSettings.monthlyDay || 0) || null,
+                  first_twice_monthly_day:
+                    Number(nextSettings.firstTwiceMonthlyDay || 0) || null,
+                  second_twice_monthly_day:
+                    Number(nextSettings.secondTwiceMonthlyDay || 0) || null,
+                },
+                { onConflict: "user_id" }
+              );
+
+            if (paycheckMigrationError) {
+              logSupabaseError(
+                "Failed to migrate paycheck settings to Supabase",
+                paycheckMigrationError,
+                {
+                  userId: uid,
+                }
+              );
+            }
+          }
+        } catch (migrationError) {
+          logSupabaseError("Failed to migrate paycheck settings", migrationError, {
+            userId: uid,
+          });
+        }
+      }
+
+      setPaycheckSyncReady(true);
 
       const { data: savingsData, error: savingsError } = await supabase
         .from("savings")
@@ -789,6 +901,18 @@ export default function Home() {
 
     init();
   }, [router]);
+
+  function syncExpandedDebtState(nextDebts: Debt[]) {
+    setExpandedDebts((current) => {
+      const next: Record<string, boolean> = {};
+
+      nextDebts.forEach((debt) => {
+        next[debt.id] = current[debt.id] ?? false;
+      });
+
+      return next;
+    });
+  }
 
   const setupDefaults = async () => {
     if (!userId) return;
@@ -1013,7 +1137,11 @@ export default function Home() {
       return;
     }
 
-    if (data) setDebts([...debts, data]);
+    if (data) {
+      const nextDebts = [...debts, data];
+      setDebts(nextDebts);
+      syncExpandedDebtState(nextDebts);
+    }
     setNewDebtName("");
     setNewDebtBalance("");
     setNewDebtInterest("");
@@ -1054,7 +1182,9 @@ export default function Home() {
     }
 
     if (data) {
-      setDebts([...debts, ...data]);
+      const nextDebts = [...debts, ...data];
+      setDebts(nextDebts);
+      syncExpandedDebtState(nextDebts);
     }
 
     setSyncError(null);
@@ -1107,11 +1237,13 @@ export default function Home() {
     }
 
     if (data) {
-      setDebts((currentDebts) =>
-        currentDebts.map((currentDebt) =>
+      setDebts((currentDebts) => {
+        const nextDebts = currentDebts.map((currentDebt) =>
           currentDebt.id === data.id ? data : currentDebt
-        )
-      );
+        );
+        syncExpandedDebtState(nextDebts);
+        return nextDebts;
+      });
     }
 
     setSyncError(null);
@@ -1128,14 +1260,18 @@ export default function Home() {
       return;
     }
 
-    setDebts((currentDebts) => currentDebts.filter((debt) => debt.id !== debtId));
+    setDebts((currentDebts) => {
+      const nextDebts = currentDebts.filter((debt) => debt.id !== debtId);
+      syncExpandedDebtState(nextDebts);
+      return nextDebts;
+    });
     setSyncError(null);
   };
 
   const updateBillField = (
     billId: string,
-    field: keyof Pick<RecurringBill, "name" | "amount" | "due_day" | "category">,
-    value: string
+    field: keyof Pick<RecurringBill, "name" | "amount" | "due_day" | "category" | "counts_toward_available_cash">,
+    value: string | boolean
   ) => {
     setBills((currentBills) =>
       currentBills.map((bill) =>
@@ -1145,6 +1281,8 @@ export default function Home() {
               [field]:
                 field === "name" || field === "category"
                   ? value
+                  : field === "counts_toward_available_cash"
+                    ? Boolean(value)
                   : Number(value === "" ? 0 : value),
             }
           : bill
@@ -1160,6 +1298,7 @@ export default function Home() {
         amount: Number(bill.amount),
         due_day: Number(bill.due_day),
         category: bill.category.trim(),
+        counts_toward_available_cash: bill.counts_toward_available_cash ?? true,
       })
       .eq("id", bill.id)
       .select()
@@ -1181,6 +1320,60 @@ export default function Home() {
       );
     }
 
+    setSyncError(null);
+  };
+
+  const addRecurringBill = async () => {
+    if (!userId) return;
+
+    const trimmedName = newBillName.trim();
+    const trimmedCategory = newBillCategory.trim() || trimmedName;
+    const amount = Number(newBillAmount || 0);
+    const dueDay = Number(newBillDueDay || 0);
+
+    if (!trimmedName) {
+      setSyncError("Recurring bill name is required.");
+      return;
+    }
+
+    if (dueDay < 1 || dueDay > 31) {
+      setSyncError("Recurring bill due day must be between 1 and 31.");
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("recurring_bills")
+      .insert([
+        {
+          user_id: userId,
+          name: trimmedName,
+          amount,
+          due_day: dueDay,
+          category: trimmedCategory,
+          counts_toward_available_cash: true,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to add recurring bill", error, {
+        userId,
+        name: trimmedName,
+        amount,
+        due_day: dueDay,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    if (data) {
+      setBills([...bills, data]);
+    }
+
+    setNewBillName("");
+    setNewBillAmount("");
+    setNewBillDueDay("");
     setSyncError(null);
   };
 
@@ -1239,6 +1432,54 @@ export default function Home() {
     setSyncError(null);
   };
 
+  const updateBudgetItemTarget = (itemKey: string, value: string) => {
+    const amount = Math.max(0, Number(value || 0));
+
+    if (itemKey.startsWith("bill:")) {
+      const billId = itemKey.replace("bill:", "");
+      setBills((currentBills) =>
+        currentBills.map((bill) =>
+          bill.id === billId
+            ? {
+                ...bill,
+                amount,
+              }
+            : bill
+        )
+      );
+      return;
+    }
+
+    const categoryId = itemKey.replace("category:", "");
+    setCategories((currentCategories) =>
+      currentCategories.map((category) =>
+        category.id === categoryId
+          ? {
+              ...category,
+              monthly_limit: amount,
+            }
+          : category
+      )
+    );
+  };
+
+  const saveBudgetItemTarget = async (itemKey: string) => {
+    if (itemKey.startsWith("bill:")) {
+      const billId = itemKey.replace("bill:", "");
+      const bill = bills.find((currentBill) => currentBill.id === billId);
+      if (bill) {
+        await saveBill(bill);
+      }
+      return;
+    }
+
+    const categoryId = itemKey.replace("category:", "");
+    const category = categories.find((currentCategory) => currentCategory.id === categoryId);
+    if (category) {
+      await saveCategory(category);
+    }
+  };
+
   const updateAssignedBudget = (itemKey: string, value: string) => {
     const amount = Math.max(0, Number(value || 0));
     const nextAssignments = {
@@ -1247,6 +1488,13 @@ export default function Home() {
     };
 
     void commitAssignedBudget(nextAssignments);
+  };
+
+  const toggleDebtExpanded = (debtId: string) => {
+    setExpandedDebts((current) => ({
+      ...current,
+      [debtId]: !current[debtId],
+    }));
   };
 
   const addCategory = async () => {
@@ -1352,7 +1600,11 @@ export default function Home() {
   const currentBankBalance = accounts[0]?.current_balance || 0;
 
   const unpaidBillsThisMonth = bills
-    .filter((bill) => !bill.is_paid)
+    .filter(
+      (bill) =>
+        !bill.is_paid &&
+        (bill.counts_toward_available_cash ?? true)
+    )
     .reduce((sum, bill) => sum + Number(bill.amount), 0);
 
   const protectedBuffer = 50;
@@ -1423,6 +1675,8 @@ export default function Home() {
         name: bill.name,
         target,
         assigned,
+        activity: 0,
+        available: assigned,
         needed: Math.max(target - assigned, 0),
         detail: `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`,
         sortOrder: Number(bill.due_day || 99),
@@ -1435,6 +1689,8 @@ export default function Home() {
       const key = `category:${category.id}`;
       const target = Number(category.monthly_limit || 0);
       const assigned = Number(assignedBudget[key] || 0);
+      const matchedCategoryRow = categoryRows.find((row) => row.id === category.id);
+      const activity = Number(matchedCategoryRow?.monthlySpent || 0);
 
       return {
         key,
@@ -1442,6 +1698,8 @@ export default function Home() {
         name: category.name,
         target,
         assigned,
+        activity,
+        available: assigned - activity,
         needed: Math.max(target - assigned, 0),
         detail: `${formatCurrency(Math.max(target - assigned, 0))} more needed this month`,
         sortOrder: Number(category.priority || 999),
@@ -1488,12 +1746,15 @@ export default function Home() {
     return sum + remaining;
   }, 0);
   const assignedGoalReserve = categoryBudgetItems
-    .filter((item) => item.group === "Debt" || item.group === "Savings")
+    .filter((item) => item.group === "Savings")
     .reduce((sum, item) => sum + Math.max(item.assigned, 0), 0);
   const upcomingBillsBeforePayday = billBudgetItems.filter((bill) => {
     if (!nextPayday) return false;
     const matchedBill = bills.find((item) => `bill:${item.id}` === bill.key);
     if (!matchedBill || matchedBill.is_paid) return false;
+    if (!(matchedBill.counts_toward_available_cash ?? true)) {
+      return false;
+    }
     const dueDate = getNextDueDate(Number(matchedBill.due_day || 1), now);
     return dueDate <= nextPayday;
   });
@@ -1510,10 +1771,10 @@ export default function Home() {
   const daysUntilPaydayWindow = Math.max(daysUntilNextPayday ?? getDaysRemainingInMonth(now), 1);
   const dailyCashAllowance = cashAvailableUntilPayday / daysUntilPaydayWindow;
   const dailyFundedAllowance = fundedSpendingRemaining / daysUntilPaydayWindow;
+  const dailyUnassignedAllowance = Math.max(readyToAssign, 0) / daysUntilPaydayWindow;
   const dailySafeToSpend = Math.min(
     dailyCashAllowance,
-    dailyFundedAllowance,
-    Math.max(readyToAssign <= 0 ? Number.POSITIVE_INFINITY : 0, 0)
+    dailyFundedAllowance + dailyUnassignedAllowance
   );
   const weeklyFundedSpendAllowance = fundedSpendingRemaining / weeksRemainingInMonth;
   const weeklyBudgetCapRemaining = spendingCategoryRows.reduce(
@@ -1551,15 +1812,12 @@ export default function Home() {
         : 0;
   const cashCoversUntilPayday = currentBankBalance >= cashReservedUntilPayday;
   const safeToSpendStatus =
-    readyToAssign > 0
-      ? `Assign ${formatCurrency(readyToAssign)} before treating this as spendable`
-      : safeToSpend <= 0
+    safeToSpend <= 0
       ? "Overspending risk 🚨"
-      : `${formatCurrency(dailySafeToSpend)} safe today • ${formatCurrency(safeThisWeek)} safe this week`;
+      : `${formatCurrency(dailySafeToSpend)} safe today • ${formatCurrency(safeThisWeek)} safe this week • ${formatCurrency(Math.max(readyToAssign, 0))} still unassigned`;
   const canAfford =
     Number(planned || 0) <= safeToSpend &&
-    Number(planned || 0) <= availableCash &&
-    readyToAssign <= 0;
+    Number(planned || 0) <= availableCash;
 
   const fundItem = (itemKey: string, amount: number) => {
     if (amount <= 0) return;
@@ -1872,6 +2130,13 @@ export default function Home() {
                   </>
                 ) : null}
               </div>
+
+              <button
+                onClick={() => void savePaycheckSettings()}
+                className="mt-3 w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+              >
+                {paycheckSyncReady ? "Save Paycheck Settings" : "Loading Paycheck Settings"}
+              </button>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -1932,7 +2197,7 @@ export default function Home() {
                         <div className="text-right">
                           <p>{formatCurrency(item.assigned)}</p>
                           <p className="text-xs text-gray-500">
-                            target {formatCurrency(item.target)}
+                            available {formatCurrency(item.available)}
                           </p>
                         </div>
                       </div>
@@ -1946,13 +2211,25 @@ export default function Home() {
                         />
                       </div>
 
-                      <div className="mt-3 flex gap-2">
+                      <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+                        <input
+                          value={String(item.target)}
+                          onChange={(e) => updateBudgetItemTarget(item.key, e.target.value)}
+                          type="number"
+                          className="rounded-lg border border-gray-700 bg-black p-2"
+                        />
                         <input
                           value={String(item.assigned)}
                           onChange={(e) => updateAssignedBudget(item.key, e.target.value)}
                           type="number"
-                          className="flex-1 rounded-lg border border-gray-700 bg-black p-2"
+                          className="rounded-lg border border-gray-700 bg-black p-2"
                         />
+                        <button
+                          onClick={() => void saveBudgetItemTarget(item.key)}
+                          className="rounded-lg border border-slate-600 px-3 py-2 text-slate-300"
+                        >
+                          Save Target
+                        </button>
                         <button
                           onClick={() => fundItem(item.key, Math.min(item.needed, Math.max(readyToAssign, 0)))}
                           className="rounded-lg border border-cyan-400 px-3 py-2 text-cyan-300"
@@ -2069,6 +2346,48 @@ export default function Home() {
 
         <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6">
           <p className="text-sm text-gray-400">Recurring Bills</p>
+          <div className="mt-3 rounded-xl border border-gray-800 bg-black/30 p-3">
+            <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Add recurring bill</p>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2">
+              <input
+                value={newBillName}
+                onChange={(e) => setNewBillName(e.target.value)}
+                placeholder="Bill name"
+                className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+              />
+              <input
+                value={newBillCategory}
+                onChange={(e) => setNewBillCategory(e.target.value)}
+                placeholder="Category"
+                className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+              />
+              <input
+                value={newBillAmount}
+                onChange={(e) => setNewBillAmount(e.target.value)}
+                type="number"
+                placeholder="Amount"
+                className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+              />
+              <input
+                value={newBillDueDay}
+                onChange={(e) => setNewBillDueDay(e.target.value)}
+                type="number"
+                min="1"
+                max="31"
+                placeholder="Due day"
+                className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+              />
+            </div>
+            <p className="mt-3 text-xs text-gray-500">
+              New bills count toward Available Cash by default. Toggle them off below for debt-style obligations.
+            </p>
+            <button
+              onClick={addRecurringBill}
+              className="mt-3 w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+            >
+              Add Bill
+            </button>
+          </div>
           <div className="mt-3 space-y-3">
             {bills.map((bill) => (
               <div key={bill.id} className="rounded-xl bg-black/40 p-3">
@@ -2097,6 +2416,21 @@ export default function Home() {
                     onChange={(e) => updateBillField(bill.id, "category", e.target.value)}
                     className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
                   />
+                  <label className="col-span-2 flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
+                    <span>Counts toward Available Cash</span>
+                    <input
+                      checked={bill.counts_toward_available_cash ?? true}
+                      onChange={(e) =>
+                        updateBillField(
+                          bill.id,
+                          "counts_toward_available_cash",
+                          e.target.checked
+                        )
+                      }
+                      type="checkbox"
+                      className="h-4 w-4 accent-cyan-400"
+                    />
+                  </label>
                 </div>
                 <button
                   onClick={() => saveBill(bill)}
@@ -2311,13 +2645,18 @@ export default function Home() {
               </button>
             </div>
 
-            <input
-              value={extraDebtPayment}
-              onChange={(e) => setExtraDebtPayment(e.target.value)}
-              placeholder="Extra monthly debt payment"
-              type="number"
-              className="w-full rounded-xl bg-black border border-gray-700 p-3"
-            />
+            <label className="block text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                Extra Monthly Debt Payment
+              </span>
+              <input
+                value={extraDebtPayment}
+                onChange={(e) => setExtraDebtPayment(e.target.value)}
+                placeholder="Extra monthly debt payment"
+                type="number"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
 
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div className="rounded-xl border border-gray-800 bg-black/40 p-3">
@@ -2342,35 +2681,55 @@ export default function Home() {
           <div className="mt-4 rounded-xl border border-gray-700 bg-black/30 p-3 space-y-3">
             <p className="text-sm text-gray-400">Add Debt</p>
 
-            <input
-              value={newDebtName}
-              onChange={(e) => setNewDebtName(e.target.value)}
-              placeholder="Debt name"
-              className="w-full rounded-xl bg-black border border-gray-700 p-3"
-            />
+            <label className="block text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                Debt Name
+              </span>
+              <input
+                value={newDebtName}
+                onChange={(e) => setNewDebtName(e.target.value)}
+                placeholder="Debt name"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
 
-            <div className="grid grid-cols-3 gap-2">
-              <input
-                value={newDebtBalance}
-                onChange={(e) => setNewDebtBalance(e.target.value)}
-                placeholder="Balance"
-                type="number"
-                className="w-full rounded-xl bg-black border border-gray-700 p-3"
-              />
-              <input
-                value={newDebtInterest}
-                onChange={(e) => setNewDebtInterest(e.target.value)}
-                placeholder="APR %"
-                type="number"
-                className="w-full rounded-xl bg-black border border-gray-700 p-3"
-              />
-              <input
-                value={newDebtMinPayment}
-                onChange={(e) => setNewDebtMinPayment(e.target.value)}
-                placeholder="Min pay"
-                type="number"
-                className="w-full rounded-xl bg-black border border-gray-700 p-3"
-              />
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+              <label className="text-sm text-gray-300">
+                <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                  Remaining Balance
+                </span>
+                <input
+                  value={newDebtBalance}
+                  onChange={(e) => setNewDebtBalance(e.target.value)}
+                  placeholder="Balance"
+                  type="number"
+                  className="w-full rounded-xl bg-black border border-gray-700 p-3"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                  Interest Rate
+                </span>
+                <input
+                  value={newDebtInterest}
+                  onChange={(e) => setNewDebtInterest(e.target.value)}
+                  placeholder="APR %"
+                  type="number"
+                  className="w-full rounded-xl bg-black border border-gray-700 p-3"
+                />
+              </label>
+              <label className="text-sm text-gray-300">
+                <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                  Monthly Payment
+                </span>
+                <input
+                  value={newDebtMinPayment}
+                  onChange={(e) => setNewDebtMinPayment(e.target.value)}
+                  placeholder="Min pay"
+                  type="number"
+                  className="w-full rounded-xl bg-black border border-gray-700 p-3"
+                />
+              </label>
             </div>
 
             <button
@@ -2402,49 +2761,97 @@ export default function Home() {
           <div className="mt-3 space-y-2">
             {debts.map((debt) => (
               <div key={debt.id} className="rounded-xl bg-black/40 p-3 text-sm">
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    value={debt.name}
-                    onChange={(e) => updateDebtField(debt.id, "name", e.target.value)}
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(debt.balance)}
-                    onChange={(e) => updateDebtField(debt.id, "balance", e.target.value)}
-                    type="number"
-                    placeholder="Balance"
-                    className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(debt.interest)}
-                    onChange={(e) => updateDebtField(debt.id, "interest", e.target.value)}
-                    type="number"
-                    placeholder="APR %"
-                    className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(debt.min_payment)}
-                    onChange={(e) => updateDebtField(debt.id, "min_payment", e.target.value)}
-                    type="number"
-                    placeholder="Minimum payment"
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                </div>
+                <button
+                  onClick={() => toggleDebtExpanded(debt.id)}
+                  className="flex w-full items-center justify-between gap-3 text-left"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-base text-slate-50">{debt.name || "Unnamed debt"}</p>
+                    <p className="text-xs text-gray-400">
+                      Remaining {formatCurrency(Number(debt.balance || 0))}
+                    </p>
+                  </div>
+                  <div className="shrink-0 text-right">
+                    <p className="text-lg text-cyan-300">
+                      {formatCurrency(Number(debt.balance || 0))}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {expandedDebts[debt.id] ? "Collapse" : "Expand"}
+                    </p>
+                  </div>
+                </button>
 
-                <div className="mt-3 flex gap-2">
-                  <button
-                    onClick={() => saveDebt(debt)}
-                    className="flex-1 rounded-lg border border-cyan-400 py-2 text-cyan-300"
-                  >
-                    Save
-                  </button>
-                  <button
-                    onClick={() => deleteDebt(debt.id)}
-                    className="rounded-lg border border-red-500/50 px-3 py-2 text-red-300"
-                  >
-                    Delete
-                  </button>
-                </div>
+                {expandedDebts[debt.id] ? (
+                  <>
+                    <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                      <label className="md:col-span-2 text-sm text-gray-300">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                          Debt Name
+                        </span>
+                        <input
+                          value={debt.name}
+                          onChange={(e) => updateDebtField(debt.id, "name", e.target.value)}
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </label>
+                      <label className="text-sm text-gray-300">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                          Remaining Balance
+                        </span>
+                        <input
+                          value={String(debt.balance)}
+                          onChange={(e) => updateDebtField(debt.id, "balance", e.target.value)}
+                          type="number"
+                          placeholder="Balance"
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </label>
+                      <label className="text-sm text-gray-300">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                          Interest Rate
+                        </span>
+                        <input
+                          value={String(debt.interest)}
+                          onChange={(e) => updateDebtField(debt.id, "interest", e.target.value)}
+                          type="number"
+                          placeholder="APR %"
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </label>
+                      <label className="md:col-span-2 text-sm text-gray-300">
+                        <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                          Monthly Payment
+                        </span>
+                        <input
+                          value={String(debt.min_payment)}
+                          onChange={(e) => updateDebtField(debt.id, "min_payment", e.target.value)}
+                          type="number"
+                          placeholder="Monthly payment"
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </label>
+                    </div>
+
+                    <p className="mt-2 text-xs text-gray-500">
+                      Adjust the monthly payment here to reflect what you want this debt to receive each month.
+                    </p>
+
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        onClick={() => saveDebt(debt)}
+                        className="flex-1 rounded-lg border border-cyan-400 py-2 text-cyan-300"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={() => deleteDebt(debt.id)}
+                        className="rounded-lg border border-red-500/50 px-3 py-2 text-red-300"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </>
+                ) : null}
               </div>
             ))}
           </div>
