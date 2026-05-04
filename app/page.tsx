@@ -483,6 +483,20 @@ const DEFAULT_PAYCHECK_SETTINGS: PaycheckSettings = {
   secondTwiceMonthlyDay: "15",
 };
 
+const OVESPENDING_KEYWORDS = [
+  "dining",
+  "eating",
+  "restaurant",
+  "shopping",
+  "entertainment",
+  "convenience",
+  "misc",
+  "fun",
+  "coffee",
+  "takeout",
+  "delivery",
+];
+
 export default function Home() {
   const router = useRouter();
 
@@ -497,6 +511,7 @@ export default function Home() {
   const [savings, setSavings] = useState<Savings | null>(null);
   const [bills, setBills] = useState<RecurringBill[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorthSnapshot | null>(null);
+  const [netWorthHistory, setNetWorthHistory] = useState<NetWorthSnapshot[]>([]);
 
   const [amount, setAmount] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("Groceries");
@@ -524,6 +539,8 @@ export default function Home() {
   );
   const [paycheckSyncReady, setPaycheckSyncReady] = useState(false);
   const [expandedDebts, setExpandedDebts] = useState<Record<string, boolean>>({});
+  const [netWorthAssetsInput, setNetWorthAssetsInput] = useState("");
+  const [netWorthDebtsInput, setNetWorthDebtsInput] = useState("");
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
@@ -739,8 +756,7 @@ export default function Home() {
             .select("*")
             .eq("user_id", uid)
             .order("snapshot_date", { ascending: false })
-            .limit(1)
-            .maybeSingle(),
+            .limit(8),
 
           supabase
             .from("budget_assignments")
@@ -781,7 +797,9 @@ export default function Home() {
       setDebts(debtRes.data || []);
       syncExpandedDebtState(debtRes.data || []);
       setBills(billRes.data || []);
-      setNetWorth(netWorthRes.data || null);
+      const snapshotHistory = netWorthRes.data || [];
+      setNetWorthHistory(snapshotHistory);
+      setNetWorth(snapshotHistory[0] || null);
 
       const remoteAssignments = Object.fromEntries(
         ((assignmentRes.data as BudgetAssignmentRow[] | null) || []).map((row) => [
@@ -1090,6 +1108,54 @@ export default function Home() {
     }
 
     if (data) setSavings(data);
+    setSyncError(null);
+  };
+
+  const saveNetWorthSnapshot = async () => {
+    if (!userId) return;
+
+    const assets = Number(netWorthAssetsInput || 0);
+    const debtAmount = Number(netWorthDebtsInput || 0);
+    const nextSnapshotDate = formatInputDate(new Date());
+
+    const { data, error } = await supabase
+      .from("net_worth_snapshots")
+      .insert([
+        {
+          user_id: userId,
+          assets,
+          debts: debtAmount,
+          net_worth: assets - debtAmount,
+          snapshot_date: nextSnapshotDate,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to save net worth snapshot", error, {
+        userId,
+        assets,
+        debts: debtAmount,
+        snapshot_date: nextSnapshotDate,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    if (data) {
+      const nextHistory = [data, ...netWorthHistory]
+        .sort(
+          (a, b) =>
+            new Date(b.snapshot_date).getTime() - new Date(a.snapshot_date).getTime()
+        )
+        .slice(0, 8);
+      setNetWorthHistory(nextHistory);
+      setNetWorth(nextHistory[0] || data);
+    }
+
+    setNetWorthAssetsInput("");
+    setNetWorthDebtsInput("");
     setSyncError(null);
   };
 
@@ -1596,21 +1662,28 @@ export default function Home() {
     0
   );
   const monthlyIncome = Number(monthlyIncomeInput || 0);
+  const nextPayday = getNextPayday(paycheckSettings, now);
+  const daysUntilNextPayday = nextPayday ? diffInDays(now, nextPayday) : null;
 
   const currentBankBalance = accounts[0]?.current_balance || 0;
 
-  const unpaidBillsThisMonth = bills
+  const billsReservedForAvailableCash = bills
     .filter(
       (bill) =>
         !bill.is_paid &&
-        (bill.counts_toward_available_cash ?? true)
+        (bill.counts_toward_available_cash ?? true) &&
+        (
+          nextPayday
+            ? getNextDueDate(Number(bill.due_day || 1), now) <= nextPayday
+            : true
+        )
     )
     .reduce((sum, bill) => sum + Number(bill.amount), 0);
 
   const protectedBuffer = 50;
 
   const availableCash =
-    currentBankBalance - unpaidBillsThisMonth - protectedBuffer;
+    currentBankBalance - billsReservedForAvailableCash - protectedBuffer;
 
   const totalDebt = debts.reduce((sum, debt) => sum + Number(debt.balance), 0);
 
@@ -1650,11 +1723,98 @@ export default function Home() {
     };
   });
 
-  const overspendingDefense = categoryRows.filter(
-    (cat) =>
-      cat.group_name === "Overspending Defense" ||
-      cat.name === "Eating Out" ||
-      cat.name === "Convenience Stores"
+  const overspendingDefense = categoryRows
+    .map((cat) => {
+      const categoryName = `${cat.name} ${cat.group_name}`.toLowerCase();
+      const keywordMatch = OVESPENDING_KEYWORDS.some((keyword) =>
+        categoryName.includes(keyword)
+      );
+      const weeklyRisk =
+        Number(cat.weekly_limit || 0) > 0
+          ? Number(cat.weeklySpent || 0) / Number(cat.weekly_limit || 1)
+          : 0;
+      const monthlyRisk =
+        Number(cat.monthly_limit || 0) > 0
+          ? Number(cat.monthlySpent || 0) / Number(cat.monthly_limit || 1)
+          : 0;
+      const monthlyPaceOverrun =
+        Number(cat.monthly_limit || 0) > 0
+          ? Number(cat.monthlySpent || 0) -
+            (Number(cat.monthly_limit || 0) * now.getDate()) /
+              Math.max(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(), 1)
+          : 0;
+      const riskScore =
+        (keywordMatch ? 1.25 : 0) +
+        weeklyRisk * 1.4 +
+        monthlyRisk +
+        (monthlyPaceOverrun > 0 ? 0.4 : 0);
+
+      let alert = "Watching";
+      if (cat.weeklyRemaining < 0 || cat.monthlyRemaining < 0) alert = "Over";
+      else if (weeklyRisk >= 1 || monthlyRisk >= 1) alert = "Stop";
+      else if (weeklyRisk >= 0.85 || monthlyRisk >= 0.8 || monthlyPaceOverrun > 0) alert = "Caution";
+
+      return {
+        ...cat,
+        keywordMatch,
+        weeklyRisk,
+        monthlyRisk,
+        monthlyPaceOverrun,
+        riskScore,
+        alert,
+      };
+    })
+    .filter(
+      (cat) =>
+        cat.keywordMatch ||
+        cat.group_name === "Overspending Defense" ||
+        cat.weeklyRisk >= 0.6 ||
+        cat.monthlyRisk >= 0.6
+    )
+    .sort((a, b) => b.riskScore - a.riskScore)
+    .slice(0, 5);
+
+  const lastSevenDays = Array.from({ length: 7 }, (_, index) => {
+    const day = startOfDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (6 - index)));
+    const nextDay = new Date(day);
+    nextDay.setDate(day.getDate() + 1);
+    const spent = transactions
+      .filter((tx) => {
+        const txDate = new Date(tx.created_at);
+        return txDate >= day && txDate < nextDay;
+      })
+      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+
+    return {
+      label: day.toLocaleDateString("en-US", { weekday: "short" }),
+      spent,
+    };
+  });
+
+  const maxDailySpend = Math.max(...lastSevenDays.map((day) => day.spent), 1);
+  const netWorthChart = [...netWorthHistory].reverse();
+  const accountBalanceTrend = lastSevenDays.map((day) => {
+    const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (6 - lastSevenDays.findIndex((entry) => entry.label === day.label)) + 1);
+    const spendingAfterDay = transactions
+      .filter((tx) => new Date(tx.created_at) >= dayEnd)
+      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+
+    return {
+      ...day,
+      balance: currentBankBalance + spendingAfterDay,
+    };
+  });
+  const maxBalanceTrend = Math.max(
+    ...accountBalanceTrend.map((day) => Math.abs(day.balance)),
+    1
+  );
+  const categoryBreakdown = categoryRows
+    .filter((cat) => cat.monthlySpent > 0)
+    .sort((a, b) => b.monthlySpent - a.monthlySpent)
+    .slice(0, 6);
+  const maxCategoryBreakdown = Math.max(
+    ...categoryBreakdown.map((cat) => Number(cat.monthlySpent || 0)),
+    1
   );
 
   const totalMinimumDebtPayment = debts.reduce(
@@ -1729,8 +1889,6 @@ export default function Home() {
     (sum, item) => sum + item.needed,
     0
   );
-  const nextPayday = getNextPayday(paycheckSettings, now);
-  const daysUntilNextPayday = nextPayday ? diffInDays(now, nextPayday) : null;
   const spendingCategoryRows = categoryRows.filter(
     (cat) =>
       cat.group_name !== "Fixed Bills" &&
@@ -1815,6 +1973,76 @@ export default function Home() {
     safeToSpend <= 0
       ? "Overspending risk 🚨"
       : `${formatCurrency(dailySafeToSpend)} safe today • ${formatCurrency(safeThisWeek)} safe this week • ${formatCurrency(Math.max(readyToAssign, 0))} still unassigned`;
+  const cashTimeline = [...upcomingBillsBeforePayday]
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((bill, index, allBills) => {
+      const matchedBill = bills.find((item) => `bill:${item.id}` === bill.key);
+      const runningReserved = allBills
+        .slice(0, index + 1)
+        .reduce((sum, currentBill) => sum + currentBill.target, 0);
+      const postBillCash = currentBankBalance - runningReserved - protectedBuffer;
+
+      return {
+        ...bill,
+        dueLabel: matchedBill
+          ? getNextDueDate(Number(matchedBill.due_day || 1), now).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })
+          : "--",
+        postBillCash,
+      };
+    });
+  const weeklyPacePoints = lastSevenDays.map((day, index) => {
+    const cumulativeActual = lastSevenDays
+      .slice(0, index + 1)
+      .reduce((sum, currentDay) => sum + currentDay.spent, 0);
+    const cumulativeSafe = dailySafeToSpend * (index + 1);
+
+    return {
+      ...day,
+      cumulativeActual,
+      cumulativeSafe,
+    };
+  });
+  const weeklyPaceMax = Math.max(
+    ...weeklyPacePoints.flatMap((point) => [point.cumulativeActual, point.cumulativeSafe]),
+    1
+  );
+  const buildPolyline = (values: number[]) =>
+    values
+      .map((value, index) => {
+        const x = (index / Math.max(values.length - 1, 1)) * 100;
+        const y = 100 - (value / weeklyPaceMax) * 100;
+        return `${x},${Number.isFinite(y) ? y : 100}`;
+      })
+      .join(" ");
+  const actualSpendPolyline = buildPolyline(
+    weeklyPacePoints.map((point) => point.cumulativeActual)
+  );
+  const safeSpendPolyline = buildPolyline(
+    weeklyPacePoints.map((point) => point.cumulativeSafe)
+  );
+  const topOverspendingCategories = overspendingDefense
+    .filter((cat) => cat.weeklyRemaining <= 0 || cat.monthlyRemaining <= 0)
+    .slice(0, 2)
+    .map((cat) => cat.name);
+  const safeToSpendReason =
+    safeToSpend > 0
+      ? cashAvailableUntilPayday <= 0
+        ? "Bills before your next paycheck are using up your free cash."
+        : topOverspendingCategories.length > 0
+          ? `${topOverspendingCategories.join(" and ")} ${topOverspendingCategories.length === 1 ? "is" : "are"} already fully used.`
+          : "You still have room to spend within your cash flow and funded categories."
+      : cashAvailableUntilPayday <= 0
+        ? "No cash free before next payday."
+        : topOverspendingCategories.length > 0
+          ? `${topOverspendingCategories.join(" and ")} ${topOverspendingCategories.length === 1 ? "is" : "are"} already fully used.`
+          : upcomingBillsBeforePaydayTotal > 0
+            ? "Bills due before payday leave no flexible spending."
+            : fundedSpendingRemaining <= 0
+              ? "Your funded spending categories do not have any room left."
+              : "Your weekly safe-to-spend room is currently used up.";
   const canAfford =
     Number(planned || 0) <= safeToSpend &&
     Number(planned || 0) <= availableCash;
@@ -1904,6 +2132,9 @@ export default function Home() {
 
               <p className={safeToSpend <= 0 ? "mt-2 text-red-400" : "mt-2 text-emerald-400"}>
                 {safeToSpendStatus}
+              </p>
+              <p className="mt-2 max-w-xl text-sm text-slate-400">
+                {safeToSpendReason}
               </p>
             </div>
 
@@ -2166,6 +2397,134 @@ export default function Home() {
                   {upcomingBillsBeforePayday.length} upcoming bill{upcomingBillsBeforePayday.length === 1 ? "" : "s"}
                 </p>
               </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-gray-400">Account Balance Trend</p>
+            <p className="text-xs text-gray-500">Estimated last 7 days</p>
+          </div>
+
+          <div className="mt-4 grid grid-cols-7 items-end gap-2">
+            {accountBalanceTrend.map((day) => (
+              <div key={`balance-${day.label}`} className="flex flex-col items-center gap-2">
+                <div className="flex h-28 items-end">
+                  <div
+                    className={day.balance >= 0 ? "w-7 rounded-t-lg bg-cyan-400/80" : "w-7 rounded-t-lg bg-red-400/80"}
+                    style={{
+                      height: `${Math.max((Math.abs(day.balance) / maxBalanceTrend) * 96, 8)}px`,
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-gray-500">{day.label}</p>
+                <p className="text-[10px] text-gray-400">{formatCurrency(day.balance)}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-gray-400">Cash vs Bills Due</p>
+            <p className="text-xs text-gray-500">Before next paycheck</p>
+          </div>
+
+          <div className="mt-3 space-y-3">
+            {cashTimeline.length > 0 ? (
+              cashTimeline.map((bill) => (
+                <div key={`timeline-${bill.key}`} className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm text-slate-50">{bill.name}</p>
+                      <p className="text-xs text-gray-500">Due {bill.dueLabel}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm text-slate-50">{formatCurrency(bill.target)}</p>
+                      <p className={bill.postBillCash < 0 ? "text-xs text-red-400" : "text-xs text-cyan-300"}>
+                        {formatCurrency(bill.postBillCash)} after bill
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500">No cash-counting bills are due before your next paycheck.</p>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-gray-400">Category Breakdown</p>
+            <p className="text-xs text-gray-500">Month to date</p>
+          </div>
+
+          <div className="mt-3 space-y-3">
+            {categoryBreakdown.length > 0 ? (
+              categoryBreakdown.map((category) => (
+                <div key={`breakdown-${category.id}`}>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-slate-50">{category.name}</span>
+                    <span className="text-gray-400">{formatCurrency(category.monthlySpent)}</span>
+                  </div>
+                  <div className="mt-2 h-2 overflow-hidden rounded-full bg-gray-800">
+                    <div
+                      className="h-full bg-cyan-400"
+                      style={{
+                        width: `${Math.max((Number(category.monthlySpent) / maxCategoryBreakdown) * 100, 4)}%`,
+                      }}
+                    />
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500">No category spending has been recorded this month yet.</p>
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-12">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-gray-400">Weekly Safe-To-Spend Pace</p>
+            <p className="text-xs text-gray-500">Actual spending vs safe pace</p>
+          </div>
+
+          <div className="mt-4 rounded-2xl border border-gray-800 bg-black/25 p-4">
+            <svg viewBox="0 0 100 100" className="h-44 w-full overflow-visible">
+              <line x1="0" y1="100" x2="100" y2="100" stroke="rgba(148,163,184,0.28)" strokeWidth="1" />
+              <polyline
+                fill="none"
+                stroke="rgba(34,211,238,0.95)"
+                strokeWidth="2.5"
+                points={safeSpendPolyline}
+              />
+              <polyline
+                fill="none"
+                stroke="rgba(248,113,113,0.95)"
+                strokeWidth="2.5"
+                points={actualSpendPolyline}
+              />
+            </svg>
+
+            <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-gray-400">
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-cyan-400" />
+                Safe pace
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-red-400" />
+                Actual spend
+              </span>
+              <span>{formatCurrency(weeklyPacePoints.at(-1)?.cumulativeSafe || 0)} safe pace by now</span>
+              <span>{formatCurrency(weeklyPacePoints.at(-1)?.cumulativeActual || 0)} actually spent</span>
+            </div>
+
+            <div className="mt-3 grid grid-cols-7 gap-2 text-center text-[10px] text-gray-500">
+              {weeklyPacePoints.map((point) => (
+                <span key={`pace-${point.label}`}>{point.label}</span>
+              ))}
             </div>
           </div>
         </section>
@@ -2550,19 +2909,62 @@ export default function Home() {
         <section className="rounded-[1.75rem] border border-red-400/25 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4">
           <p className="text-sm text-gray-400">Overspending Defense</p>
 
-          <div className="mt-3 space-y-2">
-            {overspendingDefense.map((cat) => (
-              <div key={cat.id} className="flex justify-between text-sm">
-                <span>{cat.name}</span>
-                <span
-                  className={
-                    cat.weeklyRemaining < 0 ? "text-red-400" : "text-cyan-300"
-                  }
-                >
-                  ${cat.weeklyRemaining.toFixed(2)} left
-                </span>
-              </div>
-            ))}
+          <p className="mt-2 text-xs text-gray-500">
+            Watches your likely impulse-spend categories and flags the ones running hot this week.
+          </p>
+
+          <div className="mt-3 space-y-3">
+            {overspendingDefense.length > 0 ? (
+              overspendingDefense.map((cat) => (
+                <div key={cat.id} className="rounded-xl border border-red-500/10 bg-black/30 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm text-slate-50">{cat.name}</p>
+                      <p className="text-xs text-gray-400">
+                        {formatCurrency(cat.weeklySpent)} spent this week • {formatCurrency(cat.monthlySpent)} this month
+                      </p>
+                    </div>
+                    <span
+                      className={
+                        cat.alert === "Over"
+                          ? "rounded-full bg-red-500/15 px-2 py-1 text-xs text-red-300"
+                          : cat.alert === "Caution" || cat.alert === "Stop"
+                            ? "rounded-full bg-yellow-500/15 px-2 py-1 text-xs text-yellow-300"
+                            : "rounded-full bg-cyan-500/15 px-2 py-1 text-xs text-cyan-300"
+                      }
+                    >
+                      {cat.alert}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 h-2 overflow-hidden rounded-full bg-gray-800">
+                    <div
+                      className={
+                        cat.weeklyRemaining < 0
+                          ? "h-full bg-red-400"
+                          : cat.weeklyPercent >= 80
+                            ? "h-full bg-yellow-400"
+                            : "h-full bg-cyan-400"
+                      }
+                      style={{ width: `${Math.min(cat.weeklyPercent, 100)}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-2 flex items-center justify-between text-xs text-gray-400">
+                    <span>{formatCurrency(cat.weeklyRemaining)} left this week</span>
+                    <span>
+                      {cat.monthlyPaceOverrun > 0
+                        ? `${formatCurrency(cat.monthlyPaceOverrun)} over pace`
+                        : `${formatCurrency(Math.abs(cat.monthlyPaceOverrun))} under pace`}
+                    </span>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="text-sm text-gray-500">
+                No risky categories detected yet. Add categories like Dining Out, Shopping, or Entertainment to start tracking them.
+              </p>
+            )}
           </div>
         </section>
 
@@ -2868,19 +3270,121 @@ export default function Home() {
             </>
           ) : (
             <p className="text-gray-400 text-sm">
-              No snapshot yet. We can add a snapshot form next.
+              Save a snapshot to start a simple net worth trend.
             </p>
           )}
+
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <label className="text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Assets</span>
+              <input
+                value={netWorthAssetsInput}
+                onChange={(e) => setNetWorthAssetsInput(e.target.value)}
+                type="number"
+                placeholder="Total assets"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
+            <label className="text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Debts</span>
+              <input
+                value={netWorthDebtsInput}
+                onChange={(e) => setNetWorthDebtsInput(e.target.value)}
+                type="number"
+                placeholder="Total debts"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
+          </div>
+
+          <button
+            onClick={saveNetWorthSnapshot}
+            className="mt-3 w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+          >
+            Save Snapshot
+          </button>
+
+          <div className="mt-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Trend</p>
+            {netWorthChart.length > 0 ? (
+              <div className="mt-3 grid grid-cols-4 gap-2">
+                {netWorthChart.map((snapshot) => {
+                  const maxNetWorth = Math.max(
+                    ...netWorthChart.map((entry) => Math.abs(Number(entry.net_worth))),
+                    1
+                  );
+                  const chartHeight = Math.max(
+                    (Math.abs(Number(snapshot.net_worth)) / maxNetWorth) * 96,
+                    10
+                  );
+
+                  return (
+                    <div key={snapshot.id} className="flex flex-col items-center gap-2">
+                      <div className="flex h-28 items-end">
+                        <div
+                          className={
+                            Number(snapshot.net_worth) >= 0
+                              ? "w-8 rounded-t-lg bg-cyan-400/80"
+                              : "w-8 rounded-t-lg bg-red-400/80"
+                          }
+                          style={{ height: `${chartHeight}px` }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-gray-500">
+                        {new Date(snapshot.snapshot_date).toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                        })}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-gray-500">No trend yet.</p>
+            )}
+          </div>
         </section>
 
         <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3">
           <p className="text-sm text-gray-400 mb-2">Recent Transactions</p>
-          {transactions.slice(0, 8).map((tx) => (
-            <div key={tx.id} className="flex justify-between py-1 text-sm">
-              <span>{tx.category}</span>
-              <span>-${Number(tx.amount).toFixed(2)}</span>
+
+          <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+            <div className="flex items-end justify-between">
+              {lastSevenDays.map((day) => (
+                <div key={day.label} className="flex flex-col items-center gap-2">
+                  <div className="flex h-24 items-end">
+                    <div
+                      className="w-7 rounded-t-lg bg-cyan-400/80"
+                      style={{ height: `${Math.max((day.spent / maxDailySpend) * 96, day.spent > 0 ? 8 : 0)}px` }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-gray-500">{day.label}</p>
+                  <p className="text-[10px] text-gray-400">{formatCurrency(day.spent)}</p>
+                </div>
+              ))}
             </div>
-          ))}
+          </div>
+
+          <div className="mt-3 space-y-2">
+            {transactions.slice(0, 8).map((tx) => (
+              <div key={tx.id} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-2 text-sm">
+                <div>
+                  <p className="text-slate-50">{tx.category}</p>
+                  <p className="text-xs text-gray-500">
+                    {new Date(tx.created_at).toLocaleDateString("en-US", {
+                      month: "short",
+                      day: "numeric",
+                    })}
+                  </p>
+                </div>
+                <span className="text-red-300">-${Number(tx.amount).toFixed(2)}</span>
+              </div>
+            ))}
+            {transactions.length === 0 ? (
+              <p className="text-sm text-gray-500">No transactions yet.</p>
+            ) : null}
+          </div>
         </section>
         </div>
       </div>
