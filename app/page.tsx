@@ -66,6 +66,16 @@ type BudgetAssignmentRow = {
   assigned: number;
 };
 
+type PayScheduleType = "weekly" | "biweekly" | "twice_monthly" | "monthly";
+
+type PaycheckSettings = {
+  type: PayScheduleType;
+  anchorDate: string;
+  monthlyDay: string;
+  firstTwiceMonthlyDay: string;
+  secondTwiceMonthlyDay: string;
+};
+
 function normalizeError(error: unknown) {
   if (!error) {
     return {
@@ -154,6 +164,104 @@ function getDaySuffix(day: number) {
 function getDaysRemainingInMonth(date: Date) {
   const endOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0);
   return Math.max(endOfMonth.getDate() - date.getDate() + 1, 1);
+}
+
+function startOfDay(date: Date) {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next;
+}
+
+function parseLocalDate(value: string) {
+  if (!value) return null;
+  const parsed = new Date(`${value}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function clampDay(year: number, month: number, day: number) {
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  return Math.min(Math.max(day, 1), daysInMonth);
+}
+
+function buildLocalDate(year: number, month: number, day: number) {
+  return new Date(year, month, clampDay(year, month, day));
+}
+
+function formatInputDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function diffInDays(from: Date, to: Date) {
+  const fromStart = startOfDay(from).getTime();
+  const toStart = startOfDay(to).getTime();
+  return Math.max(Math.ceil((toStart - fromStart) / 86400000), 0);
+}
+
+function getNextPayday(settings: PaycheckSettings, now: Date) {
+  const today = startOfDay(now);
+
+  if (settings.type === "weekly" || settings.type === "biweekly") {
+    const anchor = parseLocalDate(settings.anchorDate);
+    if (!anchor) return null;
+
+    const intervalDays = settings.type === "weekly" ? 7 : 14;
+    const candidate = startOfDay(anchor);
+
+    while (candidate < today) {
+      candidate.setDate(candidate.getDate() + intervalDays);
+    }
+
+    return candidate;
+  }
+
+  if (settings.type === "monthly") {
+    const monthlyDay = Number(settings.monthlyDay || 1);
+    const currentMonthPayday = buildLocalDate(
+      today.getFullYear(),
+      today.getMonth(),
+      monthlyDay
+    );
+
+    if (currentMonthPayday >= today) {
+      return currentMonthPayday;
+    }
+
+    return buildLocalDate(today.getFullYear(), today.getMonth() + 1, monthlyDay);
+  }
+
+  const firstDay = Number(settings.firstTwiceMonthlyDay || 1);
+  const secondDay = Number(settings.secondTwiceMonthlyDay || 15);
+  const dayOptions = [firstDay, secondDay].sort((a, b) => a - b);
+  const candidates = [
+    buildLocalDate(today.getFullYear(), today.getMonth(), dayOptions[0]),
+    buildLocalDate(today.getFullYear(), today.getMonth(), dayOptions[1]),
+    buildLocalDate(today.getFullYear(), today.getMonth() + 1, dayOptions[0]),
+    buildLocalDate(today.getFullYear(), today.getMonth() + 1, dayOptions[1]),
+  ];
+
+  return candidates.find((candidate) => candidate >= today) || null;
+}
+
+function getNextDueDate(dueDay: number, now: Date) {
+  const today = startOfDay(now);
+  const currentMonthDueDate = buildLocalDate(
+    today.getFullYear(),
+    today.getMonth(),
+    dueDay
+  );
+
+  if (currentMonthDueDate >= today) {
+    return currentMonthDueDate;
+  }
+
+  return buildLocalDate(today.getFullYear(), today.getMonth() + 1, dueDay);
+}
+
+function getPaycheckStorageKey(userId: string | null) {
+  return userId ? `money-os:paycheck-settings:${userId}` : "money-os:paycheck-settings";
 }
 
 function pickTargetDebtIndex(
@@ -358,6 +466,14 @@ const USER_DEBT_PRESET = [
   },
 ] as const;
 
+const DEFAULT_PAYCHECK_SETTINGS: PaycheckSettings = {
+  type: "biweekly",
+  anchorDate: formatInputDate(new Date()),
+  monthlyDay: "1",
+  firstTwiceMonthlyDay: "1",
+  secondTwiceMonthlyDay: "15",
+};
+
 export default function Home() {
   const router = useRouter();
 
@@ -390,6 +506,9 @@ export default function Home() {
   const [monthlyIncomeInput, setMonthlyIncomeInput] = useState(String(DEFAULT_MONTHLY_INCOME));
   const [assignedBudget, setAssignedBudget] = useState<Record<string, number>>({});
   const [assignmentSyncReady, setAssignmentSyncReady] = useState(false);
+  const [paycheckSettings, setPaycheckSettings] = useState<PaycheckSettings>(
+    DEFAULT_PAYCHECK_SETTINGS
+  );
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
@@ -485,6 +604,38 @@ export default function Home() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem("money-os:income", monthlyIncomeInput || "0");
   }, [monthlyIncomeInput]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storageKey = getPaycheckStorageKey(userId);
+    const storedSettings = window.localStorage.getItem(storageKey);
+
+    if (storedSettings) {
+      const frame = window.requestAnimationFrame(() => {
+        try {
+          const parsed = JSON.parse(storedSettings) as Partial<PaycheckSettings>;
+          setPaycheckSettings((current) => ({
+            ...current,
+            ...parsed,
+          }));
+        } catch (error) {
+          logSupabaseError("Failed to parse paycheck settings", error, {
+            storageKey,
+          });
+        }
+      });
+
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      getPaycheckStorageKey(userId),
+      JSON.stringify(paycheckSettings)
+    );
+  }, [paycheckSettings, userId]);
 
   useEffect(() => {
     const init = async () => {
@@ -1320,6 +1471,8 @@ export default function Home() {
     (sum, item) => sum + item.needed,
     0
   );
+  const nextPayday = getNextPayday(paycheckSettings, now);
+  const daysUntilNextPayday = nextPayday ? diffInDays(now, nextPayday) : null;
   const spendingCategoryRows = categoryRows.filter(
     (cat) =>
       cat.group_name !== "Fixed Bills" &&
@@ -1334,23 +1487,75 @@ export default function Home() {
     const remaining = Math.max(fundedTarget - cat.monthlySpent, 0);
     return sum + remaining;
   }, 0);
+  const assignedGoalReserve = categoryBudgetItems
+    .filter((item) => item.group === "Debt" || item.group === "Savings")
+    .reduce((sum, item) => sum + Math.max(item.assigned, 0), 0);
+  const upcomingBillsBeforePayday = billBudgetItems.filter((bill) => {
+    if (!nextPayday) return false;
+    const matchedBill = bills.find((item) => `bill:${item.id}` === bill.key);
+    if (!matchedBill || matchedBill.is_paid) return false;
+    const dueDate = getNextDueDate(Number(matchedBill.due_day || 1), now);
+    return dueDate <= nextPayday;
+  });
+  const upcomingBillsBeforePaydayTotal = upcomingBillsBeforePayday.reduce(
+    (sum, bill) => sum + bill.target,
+    0
+  );
+  const cashReservedUntilPayday =
+    upcomingBillsBeforePaydayTotal + assignedGoalReserve + protectedBuffer;
+  const cashAvailableUntilPayday = Math.max(
+    currentBankBalance - cashReservedUntilPayday,
+    0
+  );
+  const daysUntilPaydayWindow = Math.max(daysUntilNextPayday ?? getDaysRemainingInMonth(now), 1);
+  const dailyCashAllowance = cashAvailableUntilPayday / daysUntilPaydayWindow;
+  const dailyFundedAllowance = fundedSpendingRemaining / daysUntilPaydayWindow;
+  const dailySafeToSpend = Math.min(
+    dailyCashAllowance,
+    dailyFundedAllowance,
+    Math.max(readyToAssign <= 0 ? Number.POSITIVE_INFINITY : 0, 0)
+  );
   const weeklyFundedSpendAllowance = fundedSpendingRemaining / weeksRemainingInMonth;
   const weeklyBudgetCapRemaining = spendingCategoryRows.reduce(
     (sum, cat) => sum + Math.max(Number(cat.weekly_limit || 0) - cat.weeklySpent, 0),
     0
   );
-  const safeToSpend = Math.min(
+  const daysRemainingThisWeek = Math.max(6 - now.getDay() + 1, 1);
+  const safeThisWeek = Math.min(
+    dailySafeToSpend * daysRemainingThisWeek,
     weeklyFundedSpendAllowance,
     weeklyBudgetCapRemaining,
-    Math.max(availableCash, 0),
-    Math.max(assignedTotal, 0)
+    cashAvailableUntilPayday
   );
+  const safeToSpend = Math.min(
+    safeThisWeek,
+    Math.max(availableCash, 0)
+  );
+  const nextFriday = new Date(now);
+  nextFriday.setDate(now.getDate() + ((5 - now.getDay() + 7) % 7));
+  const daysUntilFriday = Math.max(diffInDays(now, nextFriday), 1);
+  const safeThroughFriday = Math.min(
+    dailySafeToSpend * daysUntilFriday,
+    fundedSpendingRemaining,
+    cashAvailableUntilPayday
+  );
+  const fridayNumberAfterPlanned = Math.max(
+    safeThroughFriday - Number(planned || 0),
+    0
+  );
+  const cashRunwayDays =
+    dailySafeToSpend > 0
+      ? Math.max(Math.floor(cashAvailableUntilPayday / dailySafeToSpend), 0)
+      : cashAvailableUntilPayday > 0
+        ? daysUntilPaydayWindow
+        : 0;
+  const cashCoversUntilPayday = currentBankBalance >= cashReservedUntilPayday;
   const safeToSpendStatus =
     readyToAssign > 0
       ? `Assign ${formatCurrency(readyToAssign)} before treating this as spendable`
       : safeToSpend <= 0
       ? "Overspending risk 🚨"
-      : `${formatCurrency(weeklyFundedSpendAllowance)} funded for this week`;
+      : `${formatCurrency(dailySafeToSpend)} safe today • ${formatCurrency(safeThisWeek)} safe this week`;
   const canAfford =
     Number(planned || 0) <= safeToSpend &&
     Number(planned || 0) <= availableCash &&
@@ -1446,6 +1651,18 @@ export default function Home() {
 
             <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-2">
               <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Safe Today</p>
+                <p className="mt-3 text-3xl text-slate-50">{formatCurrency(dailySafeToSpend)}</p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Safe This Week</p>
+                <p className={safeThisWeek <= 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}>
+                  {formatCurrency(safeThisWeek)}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
                 <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Bank Balance</p>
                 <p className="mt-3 text-3xl text-slate-50">{formatCurrency(currentBankBalance)}</p>
               </div>
@@ -1458,10 +1675,22 @@ export default function Home() {
               </div>
 
               <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Next Payday</p>
+                <p className="mt-3 text-2xl text-slate-50">
+                  {nextPayday ? formatMonthYear(nextPayday) : "Set schedule"}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
                 <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Ready To Assign</p>
                 <p className={readyToAssign < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-emerald-400"}>
                   {formatCurrency(readyToAssign)}
                 </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Friday After This</p>
+                <p className="mt-3 text-3xl text-slate-50">{formatCurrency(fridayNumberAfterPlanned)}</p>
               </div>
 
               <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
@@ -1536,6 +1765,143 @@ export default function Home() {
             >
               Reset
             </button>
+          </div>
+        </section>
+
+        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-7">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-sm text-gray-400">Paycheck Calendar</p>
+            <p className={cashCoversUntilPayday ? "text-sm text-emerald-400" : "text-sm text-red-400"}>
+              {cashCoversUntilPayday ? "Covered to payday" : "Short before payday"}
+            </p>
+          </div>
+
+          <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+            <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-sm text-gray-300">
+                  <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Pay schedule</span>
+                  <select
+                    value={paycheckSettings.type}
+                    onChange={(e) =>
+                      setPaycheckSettings((current) => ({
+                        ...current,
+                        type: e.target.value as PayScheduleType,
+                      }))
+                    }
+                    className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                  >
+                    <option value="weekly">Weekly</option>
+                    <option value="biweekly">Biweekly</option>
+                    <option value="twice_monthly">Twice monthly</option>
+                    <option value="monthly">Monthly</option>
+                  </select>
+                </label>
+
+                {(paycheckSettings.type === "weekly" ||
+                  paycheckSettings.type === "biweekly") ? (
+                  <label className="text-sm text-gray-300">
+                    <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Known payday</span>
+                    <input
+                      value={paycheckSettings.anchorDate}
+                      onChange={(e) =>
+                        setPaycheckSettings((current) => ({
+                          ...current,
+                          anchorDate: e.target.value,
+                        }))
+                      }
+                      type="date"
+                      className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                    />
+                  </label>
+                ) : null}
+
+                {paycheckSettings.type === "monthly" ? (
+                  <label className="text-sm text-gray-300">
+                    <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Day of month</span>
+                    <input
+                      value={paycheckSettings.monthlyDay}
+                      onChange={(e) =>
+                        setPaycheckSettings((current) => ({
+                          ...current,
+                          monthlyDay: e.target.value,
+                        }))
+                      }
+                      type="number"
+                      min="1"
+                      max="31"
+                      className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                    />
+                  </label>
+                ) : null}
+
+                {paycheckSettings.type === "twice_monthly" ? (
+                  <>
+                    <label className="text-sm text-gray-300">
+                      <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">First payday</span>
+                      <input
+                        value={paycheckSettings.firstTwiceMonthlyDay}
+                        onChange={(e) =>
+                          setPaycheckSettings((current) => ({
+                            ...current,
+                            firstTwiceMonthlyDay: e.target.value,
+                          }))
+                        }
+                        type="number"
+                        min="1"
+                        max="31"
+                        className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                      />
+                    </label>
+                    <label className="text-sm text-gray-300">
+                      <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Second payday</span>
+                      <input
+                        value={paycheckSettings.secondTwiceMonthlyDay}
+                        onChange={(e) =>
+                          setPaycheckSettings((current) => ({
+                            ...current,
+                            secondTwiceMonthlyDay: e.target.value,
+                          }))
+                        }
+                        type="number"
+                        min="1"
+                        max="31"
+                        className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                      />
+                    </label>
+                  </>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Next payday</p>
+                <p className="mt-2 text-lg text-slate-50">
+                  {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "Set pay schedule"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Days until payday</p>
+                <p className="mt-2 text-lg text-slate-50">
+                  {daysUntilNextPayday ?? "--"}
+                </p>
+              </div>
+              <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Cash runway</p>
+                <p className="mt-2 text-lg text-slate-50">{cashRunwayDays} days</p>
+                <p className="text-xs text-gray-500">
+                  {formatCurrency(cashAvailableUntilPayday)} free after reserves
+                </p>
+              </div>
+              <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Bills before payday</p>
+                <p className="mt-2 text-lg text-slate-50">{formatCurrency(upcomingBillsBeforePaydayTotal)}</p>
+                <p className="text-xs text-gray-500">
+                  {upcomingBillsBeforePayday.length} upcoming bill{upcomingBillsBeforePayday.length === 1 ? "" : "s"}
+                </p>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1796,6 +2162,9 @@ export default function Home() {
           />
           <p className={canAfford ? "mt-2 text-green-400" : "mt-2 text-red-400"}>
             {canAfford ? "YES ✅ Fits your budget and cash flow" : "NO 🚫 Wait or move money first"}
+          </p>
+          <p className="mt-2 text-sm text-gray-400">
+            If you spend this now, your Friday safe-to-spend becomes {formatCurrency(fridayNumberAfterPlanned)}.
           </p>
         </section>
 

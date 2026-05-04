@@ -8,10 +8,18 @@ export default function LoginPage() {
   const [message, setMessage] = useState("");
 
   const login = async () => {
+    const configuredSiteUrl =
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      (process.env.NEXT_PUBLIC_VERCEL_URL
+        ? `https://${process.env.NEXT_PUBLIC_VERCEL_URL}`
+        : undefined);
+
     const emailRedirectTo =
-      typeof window === "undefined"
-        ? undefined
-        : `${window.location.origin}/auth/callback`;
+      configuredSiteUrl
+        ? `${configuredSiteUrl}/auth/callback`
+        : typeof window === "undefined"
+          ? undefined
+          : `${window.location.origin}/auth/callback`;
 
     const { error } = await supabase.auth.signInWithOtp({
       email,
