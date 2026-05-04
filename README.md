@@ -1,36 +1,56 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Money OS
 
-## Getting Started
+Money OS is a personal budgeting app focused on:
 
-First, run the development server:
+- zero-based monthly planning
+- assign-every-dollar budgeting
+- safe-to-spend guidance
+- debt payoff tracking
+- recurring bills and spending categories
+
+## Local Development
+
+1. Copy `.env.example` to `.env.local`
+2. Fill in your Supabase values
+3. Install dependencies and start the app
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Required Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+```
 
-## Learn More
+## Supabase Setup
 
-To learn more about Next.js, take a look at the following resources:
+Run these SQL files in Supabase SQL Editor:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. `supabase-rls-policies.sql`
+2. `supabase-budget-assignments.sql`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+If `budget_assignments` already exists with the wrong columns, run:
 
-## Deploy on Vercel
+3. `supabase-budget-assignments-repair.sql`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Deploy
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Recommended stack:
+
+1. Push this repo to GitHub
+2. Import the repo into Vercel
+3. Add the two `NEXT_PUBLIC_SUPABASE_*` environment variables for Development, Preview, and Production
+4. Deploy `main` to production
+5. Use feature branches for preview deployments
+
+## Notes
+
+- Monthly income is stored locally in the browser right now.
+- Monthly budget assignments are intended to sync through Supabase.
+- If inserts or updates fail, check your Supabase RLS policies first.
