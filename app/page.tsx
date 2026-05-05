@@ -85,6 +85,8 @@ type PaycheckSettings = {
   secondTwiceMonthlyDay: string;
 };
 
+type MobileTab = "home" | "budget" | "spending" | "bills" | "plan";
+
 function normalizeError(error: unknown) {
   if (!error) {
     return {
@@ -483,6 +485,14 @@ const DEFAULT_PAYCHECK_SETTINGS: PaycheckSettings = {
   secondTwiceMonthlyDay: "15",
 };
 
+const MOBILE_TABS: Array<{ id: MobileTab; label: string; icon: string }> = [
+  { id: "home", label: "Home", icon: "⌂" },
+  { id: "budget", label: "Budget", icon: "$" },
+  { id: "spending", label: "Spending", icon: "+" },
+  { id: "bills", label: "Bills", icon: "◷" },
+  { id: "plan", label: "Plan", icon: "◎" },
+];
+
 const OVESPENDING_KEYWORDS = [
   "dining",
   "eating",
@@ -521,6 +531,8 @@ export default function Home() {
   const [newCategoryGroup, setNewCategoryGroup] = useState("Flexible");
   const [newCategoryWeeklyLimit, setNewCategoryWeeklyLimit] = useState("");
   const [newCategoryMonthlyLimit, setNewCategoryMonthlyLimit] = useState("");
+  const [categoryFormMessage, setCategoryFormMessage] = useState<string | null>(null);
+  const [categorySubmitting, setCategorySubmitting] = useState(false);
   const [newBillName, setNewBillName] = useState("");
   const [newBillAmount, setNewBillAmount] = useState("");
   const [newBillDueDay, setNewBillDueDay] = useState("");
@@ -539,8 +551,16 @@ export default function Home() {
   );
   const [paycheckSyncReady, setPaycheckSyncReady] = useState(false);
   const [expandedDebts, setExpandedDebts] = useState<Record<string, boolean>>({});
+  const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>("home");
   const [netWorthAssetsInput, setNetWorthAssetsInput] = useState("");
   const [netWorthDebtsInput, setNetWorthDebtsInput] = useState("");
+  const [savingsGoalInput, setSavingsGoalInput] = useState("");
+  const [savingsAdjustmentInput, setSavingsAdjustmentInput] = useState("");
+
+  function syncSavingsState(nextSavings: Savings | null) {
+    setSavings(nextSavings);
+    setSavingsGoalInput(String(Number(nextSavings?.goal || 1000)));
+  }
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
@@ -909,9 +929,9 @@ export default function Home() {
           setSyncError(getErrorMessage(newSavingsError));
         }
 
-        setSavings(newSavings);
+        syncSavingsState(newSavings);
       } else {
-        setSavings(savingsData);
+        syncSavingsState(savingsData);
       }
 
       setLoading(false);
@@ -1107,8 +1127,45 @@ export default function Home() {
       return;
     }
 
-    if (data) setSavings(data);
+    if (data) syncSavingsState(data);
     setSyncError(null);
+  };
+
+  const updateSavingsGoal = async (newGoal: number) => {
+    if (!savings) return;
+
+    const { data, error } = await supabase
+      .from("savings")
+      .update({ goal: newGoal })
+      .eq("id", savings.id)
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to update savings goal", error, {
+        savingsId: savings.id,
+        goal: newGoal,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    if (data) syncSavingsState(data);
+    setSyncError(null);
+  };
+
+  const applySavingsAdjustment = async () => {
+    if (!savings) return;
+    const adjustment = Number(savingsAdjustmentInput || 0);
+    const nextAmount = Math.max(Number(savings.current || 0) + adjustment, 0);
+
+    await updateSavings(nextAmount);
+    setSavingsAdjustmentInput("");
+  };
+
+  const resetSavingsBalance = async () => {
+    await updateSavings(0);
+    setSavingsAdjustmentInput("");
   };
 
   const saveNetWorthSnapshot = async () => {
@@ -1563,38 +1620,42 @@ export default function Home() {
     }));
   };
 
+  const trimmedNewCategoryName = newCategoryName.trim();
+  const trimmedNewCategoryGroup = newCategoryGroup.trim() || "Flexible";
+  const categoryNameExists = categories.some(
+    (category) => category.name.toLowerCase() === trimmedNewCategoryName.toLowerCase()
+  );
+  const weeklyLimitValue = Number(newCategoryWeeklyLimit || 0);
+  const monthlyLimitValue = Number(newCategoryMonthlyLimit || 0);
+  const categoryFormError = !trimmedNewCategoryName
+    ? "Category name is required."
+    : categoryNameExists
+      ? "That category already exists."
+      : weeklyLimitValue < 0 || monthlyLimitValue < 0
+        ? "Weekly and monthly limits must be zero or higher."
+        : null;
+  const canSubmitCategory = !categorySubmitting && !categoryFormError;
+
   const addCategory = async () => {
     if (!userId) return;
-
-    const trimmedName = newCategoryName.trim();
-    const trimmedGroup = newCategoryGroup.trim() || "Flexible";
-
-    if (!trimmedName) {
-      setSyncError("Category name is required.");
+    if (categoryFormError) {
+      setCategoryFormMessage(categoryFormError);
+      setSyncError(categoryFormError);
       return;
     }
 
-    const duplicate = categories.some(
-      (category) => category.name.toLowerCase() === trimmedName.toLowerCase()
-    );
-
-    if (duplicate) {
-      setSyncError("That category already exists.");
-      return;
-    }
-
-    const weeklyLimit = Number(newCategoryWeeklyLimit || 0);
-    const monthlyLimit = Number(newCategoryMonthlyLimit || 0);
+    setCategorySubmitting(true);
+    setCategoryFormMessage(null);
 
     const { data, error } = await supabase
       .from("budget_categories")
       .insert([
         {
           user_id: userId,
-          name: trimmedName,
-          group_name: trimmedGroup,
-          weekly_limit: weeklyLimit,
-          monthly_limit: monthlyLimit,
+          name: trimmedNewCategoryName,
+          group_name: trimmedNewCategoryGroup,
+          weekly_limit: weeklyLimitValue,
+          monthly_limit: monthlyLimitValue,
           priority: categories.length + 1,
           rollover: false,
         },
@@ -1605,11 +1666,13 @@ export default function Home() {
     if (error) {
       logSupabaseError("Failed to add category", error, {
         userId,
-        name: trimmedName,
-        group_name: trimmedGroup,
-        weekly_limit: weeklyLimit,
-        monthly_limit: monthlyLimit,
+        name: trimmedNewCategoryName,
+        group_name: trimmedNewCategoryGroup,
+        weekly_limit: weeklyLimitValue,
+        monthly_limit: monthlyLimitValue,
       });
+      setCategorySubmitting(false);
+      setCategoryFormMessage(getErrorMessage(error));
       setSyncError(getErrorMessage(error));
       return;
     }
@@ -1623,6 +1686,8 @@ export default function Home() {
     setNewCategoryGroup("Flexible");
     setNewCategoryWeeklyLimit("");
     setNewCategoryMonthlyLimit("");
+    setCategoryFormMessage(`Saved ${data?.name || "category"}.`);
+    setCategorySubmitting(false);
     setSyncError(null);
   };
 
@@ -1838,11 +1903,13 @@ export default function Home() {
         activity: 0,
         available: assigned,
         needed: Math.max(target - assigned, 0),
-        detail: `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`,
+        detail:
+          target > 0
+            ? `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`
+            : `No target set for the ${bill.due_day}${getDaySuffix(Number(bill.due_day))} due date.`,
         sortOrder: Number(bill.due_day || 99),
       };
-    })
-    .filter((item) => item.target > 0);
+    });
 
   const categoryBudgetItems = categories
     .map((category) => {
@@ -2023,6 +2090,18 @@ export default function Home() {
   const safeSpendPolyline = buildPolyline(
     weeklyPacePoints.map((point) => point.cumulativeSafe)
   );
+  const mobileSectionClass = (tabs: MobileTab | MobileTab[]) => {
+    const allowedTabs = Array.isArray(tabs) ? tabs : [tabs];
+    return allowedTabs.includes(activeMobileTab)
+      ? "block translate-y-0 opacity-100 transition-all duration-200 lg:block"
+      : "hidden lg:block";
+  };
+  const selectMobileTab = (tab: MobileTab) => {
+    setActiveMobileTab(tab);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  };
   const topOverspendingCategories = overspendingDefense
     .filter((cat) => cat.weeklyRemaining <= 0 || cat.monthlyRemaining <= 0)
     .slice(0, 2)
@@ -2103,7 +2182,7 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(244,114,182,0.10),_transparent_24%),linear-gradient(180deg,_#08101f_0%,_#0b1324_46%,_#09101d_100%)] px-4 py-4 text-white sm:px-6 lg:px-8 lg:py-8">
+    <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(244,114,182,0.10),_transparent_24%),linear-gradient(180deg,_#08101f_0%,_#0b1324_46%,_#09101d_100%)] px-4 py-4 pb-28 text-white sm:px-6 lg:px-8 lg:py-8 lg:pb-8">
       <div className="mx-auto max-w-7xl space-y-5 lg:space-y-6">
         <section className="overflow-hidden rounded-[2rem] border border-cyan-400/25 bg-[#10192c]/90 p-5 shadow-[0_20px_80px_rgba(0,0,0,0.45)] backdrop-blur xl:p-7">
           <div className="flex items-start justify-between gap-4">
@@ -2124,7 +2203,7 @@ export default function Home() {
             </button>
           </div>
 
-          <div className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)] lg:items-end">
+          <div className="mt-6 hidden gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)] lg:items-end lg:grid">
             <div>
               <h1 className="text-5xl font-bold text-cyan-300 drop-shadow-[0_0_16px_rgba(34,211,238,0.45)] sm:text-6xl">
             ${safeToSpend.toFixed(2)}
@@ -2178,13 +2257,85 @@ export default function Home() {
               </div>
 
               <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Friday After This</p>
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Safe By Friday</p>
                 <p className="mt-3 text-3xl text-slate-50">{formatCurrency(fridayNumberAfterPlanned)}</p>
               </div>
 
               <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
                 <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Underfunded</p>
                 <p className="mt-3 text-3xl text-slate-50">{formatCurrency(underfundedTotal)}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 space-y-4 lg:hidden">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.28em] text-slate-500">Safe To Spend</p>
+              <h1 className="mt-2 text-5xl font-bold text-cyan-300 drop-shadow-[0_0_16px_rgba(34,211,238,0.45)]">
+                ${safeToSpend.toFixed(2)}
+              </h1>
+              <p className={safeToSpend <= 0 ? "mt-2 text-sm text-red-400" : "mt-2 text-sm text-emerald-400"}>
+                {safeToSpendStatus}
+              </p>
+              <p className="mt-2 text-sm text-slate-400">{safeToSpendReason}</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Safe Today</p>
+                <p className="mt-2 text-2xl text-slate-50">{formatCurrency(dailySafeToSpend)}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Available Cash</p>
+                <p className={availableCash < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}>
+                  {formatCurrency(availableCash)}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Next Payday</p>
+                <p className="mt-2 text-xl text-slate-50">
+                  {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "Set schedule"}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Ready To Assign</p>
+                <p className={readyToAssign < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-emerald-400"}>
+                  {formatCurrency(readyToAssign)}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                onClick={() => selectMobileTab("spending")}
+                className="rounded-2xl border border-cyan-400/70 bg-cyan-400/10 px-3 py-3 text-xs font-medium uppercase tracking-[0.18em] text-cyan-300 transition-all duration-200"
+              >
+                Add Spend
+              </button>
+              <button
+                onClick={() => selectMobileTab("budget")}
+                className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-xs font-medium uppercase tracking-[0.18em] text-slate-300 transition-all duration-200"
+              >
+                Budget
+              </button>
+              <button
+                onClick={() => selectMobileTab("bills")}
+                className="rounded-2xl border border-slate-700 bg-slate-950/40 px-3 py-3 text-xs font-medium uppercase tracking-[0.18em] text-slate-300 transition-all duration-200"
+              >
+                Bills
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">This Week</p>
+                <p className={safeThisWeek <= 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}>
+                  {formatCurrency(safeThisWeek)}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Underfunded</p>
+                <p className="mt-2 text-2xl text-slate-50">{formatCurrency(underfundedTotal)}</p>
               </div>
             </div>
           </div>
@@ -2205,8 +2356,51 @@ export default function Home() {
           ) : null}
         </section>
 
+        <div className="sticky top-3 z-20 -mx-1 lg:hidden">
+          <div className="overflow-x-auto pb-1">
+            <div className="flex gap-2 px-1">
+              {MOBILE_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => selectMobileTab(tab.id)}
+                  className={
+                    activeMobileTab === tab.id
+                      ? "flex min-w-[88px] items-center justify-center gap-2 rounded-full border border-cyan-400 bg-cyan-400/15 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
+                      : "flex min-w-[88px] items-center justify-center gap-2 rounded-full border border-slate-700 bg-slate-950/50 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-slate-400 transition-all duration-200"
+                  }
+                >
+                  <span className="text-sm leading-none">{tab.icon}</span>
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-800/80 bg-slate-950/35 px-4 py-3 text-sm text-slate-300 lg:hidden">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Current View</p>
+              <p className="mt-1 text-base text-slate-50">
+                {MOBILE_TABS.find((tab) => tab.id === activeMobileTab)?.label}
+              </p>
+            </div>
+            <p className="max-w-[180px] text-right text-xs text-slate-500">
+              {activeMobileTab === "home"
+                ? "Daily overview and alerts"
+                : activeMobileTab === "budget"
+                  ? "Assign money and edit targets"
+                  : activeMobileTab === "spending"
+                    ? "Track spending and pace"
+                    : activeMobileTab === "bills"
+                      ? "Bills, cash timing, and payday"
+                      : "Debt, snapshots, and long-range planning"}
+            </p>
+          </div>
+        </div>
+
         <div className="grid gap-5 lg:grid-cols-2 2xl:grid-cols-12">
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-5">
+        <section className={`${mobileSectionClass("budget")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-5`}>
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm text-gray-400">Budget Planner</p>
             <p className={readyToAssign < 0 ? "text-sm text-red-400" : "text-sm text-green-400"}>
@@ -2257,7 +2451,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-7">
+        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-7`}>
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm text-gray-400">Paycheck Calendar</p>
             <p className={cashCoversUntilPayday ? "text-sm text-emerald-400" : "text-sm text-red-400"}>
@@ -2401,7 +2595,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4">
+        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4`}>
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-400">Account Balance Trend</p>
             <p className="text-xs text-gray-500">Estimated last 7 days</p>
@@ -2425,7 +2619,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4">
+        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4`}>
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-400">Cash vs Bills Due</p>
             <p className="text-xs text-gray-500">Before next paycheck</p>
@@ -2455,7 +2649,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4">
+        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4`}>
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-400">Category Breakdown</p>
             <p className="text-xs text-gray-500">Month to date</p>
@@ -2485,7 +2679,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-12">
+        <section className={`${mobileSectionClass(["home", "spending"])} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-12`}>
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-400">Weekly Safe-To-Spend Pace</p>
             <p className="text-xs text-gray-500">Actual spending vs safe pace</p>
@@ -2529,7 +2723,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-7">
+        <section className={`${mobileSectionClass("budget")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-7`}>
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-400">Assign Every Dollar</p>
             <p className="text-xs text-gray-500">{formatMonthYear(now)}</p>
@@ -2565,7 +2759,13 @@ export default function Home() {
                         <div
                           className="h-full bg-cyan-400"
                           style={{
-                            width: `${Math.min((item.assigned / item.target) * 100, 100)}%`,
+                            width: `${
+                              item.target > 0
+                                ? Math.min((item.assigned / item.target) * 100, 100)
+                                : item.assigned > 0
+                                  ? 100
+                                  : 0
+                            }%`,
                           }}
                         />
                       </div>
@@ -2604,7 +2804,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3">
+        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
           <p className="text-sm text-gray-400">Update Bank Balance</p>
           <input
             value={bankBalanceInput}
@@ -2621,7 +2821,7 @@ export default function Home() {
           </button>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3">
+        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
           <p className="text-sm text-gray-400">Quick Add Transaction</p>
 
           <select
@@ -2660,50 +2860,101 @@ export default function Home() {
           </button>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3">
+        <section className={`${mobileSectionClass("budget")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
           <p className="text-sm text-gray-400">Add Spending Category</p>
 
-          <input
-            value={newCategoryName}
-            onChange={(e) => setNewCategoryName(e.target.value)}
-            placeholder="Category name"
-            className="w-full rounded-xl bg-black border border-gray-700 p-3"
-          />
-
-          <input
-            value={newCategoryGroup}
-            onChange={(e) => setNewCategoryGroup(e.target.value)}
-            placeholder="Group name"
-            className="w-full rounded-xl bg-black border border-gray-700 p-3"
-          />
-
-          <div className="grid grid-cols-2 gap-3">
+          <label className="block text-sm text-gray-300">
+            <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+              Category Name
+            </span>
             <input
-              value={newCategoryWeeklyLimit}
-              onChange={(e) => setNewCategoryWeeklyLimit(e.target.value)}
-              placeholder="Weekly limit"
-              type="number"
+              value={newCategoryName}
+              onChange={(e) => {
+                setNewCategoryName(e.target.value);
+                setCategoryFormMessage(null);
+              }}
+              placeholder="Category name"
               className="w-full rounded-xl bg-black border border-gray-700 p-3"
             />
+          </label>
 
+          <label className="block text-sm text-gray-300">
+            <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+              Group Name
+            </span>
             <input
-              value={newCategoryMonthlyLimit}
-              onChange={(e) => setNewCategoryMonthlyLimit(e.target.value)}
-              placeholder="Monthly limit"
-              type="number"
+              value={newCategoryGroup}
+              onChange={(e) => {
+                setNewCategoryGroup(e.target.value);
+                setCategoryFormMessage(null);
+              }}
+              placeholder="Group name"
               className="w-full rounded-xl bg-black border border-gray-700 p-3"
             />
+          </label>
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <label className="text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                Weekly Limit
+              </span>
+              <input
+                value={newCategoryWeeklyLimit}
+                onChange={(e) => {
+                  setNewCategoryWeeklyLimit(e.target.value);
+                  setCategoryFormMessage(null);
+                }}
+                placeholder="Weekly limit"
+                type="number"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
+
+            <label className="text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                Monthly Limit
+              </span>
+              <input
+                value={newCategoryMonthlyLimit}
+                onChange={(e) => {
+                  setNewCategoryMonthlyLimit(e.target.value);
+                  setCategoryFormMessage(null);
+                }}
+                placeholder="Monthly limit"
+                type="number"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
+          </div>
+
+          <div className="rounded-xl border border-gray-800 bg-black/30 p-3 text-xs text-gray-400">
+            <p>Name a spending bucket, choose its group, and optionally set weekly or monthly targets.</p>
+            {categoryFormError ? (
+              <p className="mt-2 text-red-400">{categoryFormError}</p>
+            ) : (
+              <p className="mt-2 text-gray-500">You can save with zero limits and adjust targets later.</p>
+            )}
+            {categoryFormMessage ? (
+              <p className={categoryFormMessage.startsWith("Saved") ? "mt-2 text-emerald-400" : "mt-2 text-red-400"}>
+                {categoryFormMessage}
+              </p>
+            ) : null}
           </div>
 
           <button
             onClick={addCategory}
-            className="w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+            disabled={!canSubmitCategory}
+            className={
+              canSubmitCategory
+                ? "w-full rounded-xl border border-cyan-400 py-3 text-cyan-300"
+                : "w-full rounded-xl border border-gray-700 py-3 text-gray-500"
+            }
           >
-            Save Category
+            {categorySubmitting ? "Saving Category..." : "Save Category"}
           </button>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6">
+        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6`}>
           <p className="text-sm text-gray-400">Recurring Bills</p>
           <div className="mt-3 rounded-xl border border-gray-800 bg-black/30 p-3">
             <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Add recurring bill</p>
@@ -2802,7 +3053,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6">
+        <section className={`${mobileSectionClass("budget")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6`}>
           <p className="text-sm text-gray-400">Budget Categories</p>
           <div className="mt-3 space-y-3">
             {categories.map((category) => (
@@ -2844,7 +3095,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4">
+        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4`}>
           <p className="text-sm text-gray-400">Can I Afford This?</p>
           <input
             value={planned}
@@ -2861,7 +3112,7 @@ export default function Home() {
           </p>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4">
+        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4`}>
           <div className="flex justify-between">
             <p className="text-sm text-gray-400">Weekly Budget</p>
             <p className="text-sm">
@@ -2906,7 +3157,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-red-400/25 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4">
+        <section className={`${mobileSectionClass("home")} rounded-[1.75rem] border border-red-400/25 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4`}>
           <p className="text-sm text-gray-400">Overspending Defense</p>
 
           <p className="mt-2 text-xs text-gray-500">
@@ -2968,7 +3219,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3">
+        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
           <p className="text-sm text-gray-400">Monthly Budget</p>
           <p className="text-2xl mt-1">
             ${monthlySpentTotal.toFixed(2)} / ${monthlyBudgetTotal.toFixed(2)}
@@ -2984,7 +3235,7 @@ export default function Home() {
           </p>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3">
+        <section className={`${mobileSectionClass("plan")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
           <p className="text-sm text-gray-400">Emergency Fund</p>
           <p className="text-2xl">
             ${Number(savings?.current || 0).toFixed(2)} / ${Number(savings?.goal || 1000).toFixed(2)}
@@ -2997,15 +3248,56 @@ export default function Home() {
             />
           </div>
 
-          <button
-            onClick={() => updateSavings(Number(savings?.current || 0) + 25)}
-            className="mt-3 w-full rounded-xl border border-green-400 py-2 text-green-300"
-          >
-            Add $25
-          </button>
+          <label className="mt-3 block text-sm text-gray-300">
+            <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+              Savings Goal
+            </span>
+            <div className="flex gap-2">
+              <input
+                value={savingsGoalInput}
+                onChange={(e) => setSavingsGoalInput(e.target.value)}
+                type="number"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+              <button
+                onClick={() => void updateSavingsGoal(Math.max(Number(savingsGoalInput || 0), 0))}
+                className="rounded-xl border border-cyan-400 px-4 py-2 text-cyan-300"
+              >
+                Save
+              </button>
+            </div>
+          </label>
+
+          <label className="mt-3 block text-sm text-gray-300">
+            <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+              Add Or Remove Amount
+            </span>
+            <input
+              value={savingsAdjustmentInput}
+              onChange={(e) => setSavingsAdjustmentInput(e.target.value)}
+              type="number"
+              placeholder="Use negative numbers to subtract"
+              className="w-full rounded-xl bg-black border border-gray-700 p-3"
+            />
+          </label>
+
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => void applySavingsAdjustment()}
+              className="flex-1 rounded-xl border border-green-400 py-2 text-green-300"
+            >
+              Apply Change
+            </button>
+            <button
+              onClick={() => void resetSavingsBalance()}
+              className="rounded-xl border border-red-500/50 px-4 py-2 text-red-300"
+            >
+              Reset
+            </button>
+          </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6">
+        <section className={`${mobileSectionClass("plan")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6`}>
           <div className="flex justify-between items-center">
             <p className="text-sm text-gray-400">Debt Payoff</p>
             <button
@@ -3259,7 +3551,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3">
+        <section className={`${mobileSectionClass("plan")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
           <p className="text-sm text-gray-400">Net Worth Snapshot</p>
           {netWorth ? (
             <>
@@ -3346,7 +3638,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3">
+        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
           <p className="text-sm text-gray-400 mb-2">Recent Transactions</p>
 
           <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
@@ -3388,6 +3680,25 @@ export default function Home() {
         </section>
         </div>
       </div>
+
+      <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-700/80 bg-[#09101d]/95 px-3 py-3 backdrop-blur lg:hidden">
+        <div className="mx-auto grid max-w-7xl grid-cols-5 gap-2">
+          {MOBILE_TABS.map((tab) => (
+            <button
+              key={`bottom-${tab.id}`}
+              onClick={() => selectMobileTab(tab.id)}
+              className={
+                activeMobileTab === tab.id
+                  ? "flex flex-col items-center justify-center gap-1 rounded-2xl border border-cyan-400 bg-cyan-400/15 px-2 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
+                  : "flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-800 bg-slate-950/40 px-2 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500 transition-all duration-200"
+              }
+            >
+              <span className="text-sm leading-none">{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </nav>
     </main>
   );
 }
