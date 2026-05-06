@@ -2165,7 +2165,7 @@ export default function Home() {
         return sum + Math.max(item.assigned, 0);
       }
 
-      return nextTargetDate && nextTargetDate <= nextPayday
+      return nextTargetDate && nextPayday && nextTargetDate <= nextPayday
         ? sum + Math.max(item.assigned, 0)
         : sum;
     }
@@ -2174,6 +2174,7 @@ export default function Home() {
       matchedCategory?.target_day &&
       item.group !== "Debt" &&
       item.group !== "Fixed Bills" &&
+      nextPayday &&
       nextTargetDate &&
       nextTargetDate <= nextPayday
     ) {
