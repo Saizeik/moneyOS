@@ -8,6 +8,11 @@ type Transaction = {
   id: string;
   amount: number;
   category: string;
+  merchant?: string | null;
+  memo?: string | null;
+  account_id?: string | null;
+  transaction_date?: string | null;
+  transaction_type?: "income" | "expense" | null;
   created_at: string;
 };
 
@@ -24,6 +29,8 @@ type BudgetCategory = {
   group_name: string;
   weekly_limit: number;
   monthly_limit: number;
+  target_day?: number | null;
+  split_across_paychecks?: boolean | null;
   priority: number;
   rollover: boolean;
 };
@@ -52,6 +59,7 @@ type RecurringBill = {
   category: string;
   is_paid: boolean;
   counts_toward_available_cash?: boolean | null;
+  split_across_paychecks?: boolean | null;
 };
 
 type NetWorthSnapshot = {
@@ -140,6 +148,27 @@ function logSupabaseError(label: string, error: unknown, context?: unknown) {
 
 function formatCurrency(amount: number) {
   return `$${amount.toFixed(2)}`;
+}
+
+function getTransactionType(transaction: Transaction) {
+  return transaction.transaction_type === "income" ? "income" : "expense";
+}
+
+function getTransactionDate(transaction: Transaction) {
+  return new Date(transaction.transaction_date || transaction.created_at);
+}
+
+function getTransactionSignedAmount(transaction: Transaction) {
+  const absoluteAmount = Math.abs(Number(transaction.amount || 0));
+  return getTransactionType(transaction) === "income"
+    ? absoluteAmount
+    : -absoluteAmount;
+}
+
+function getTransactionExpenseAmount(transaction: Transaction) {
+  return getTransactionType(transaction) === "expense"
+    ? Math.abs(Number(transaction.amount || 0))
+    : 0;
 }
 
 function addMonths(date: Date, months: number) {
@@ -269,6 +298,55 @@ function getNextDueDate(dueDay: number, now: Date) {
   }
 
   return buildLocalDate(today.getFullYear(), today.getMonth() + 1, dueDay);
+}
+
+function getPaydaysThroughDate(
+  settings: PaycheckSettings,
+  now: Date,
+  endDate: Date,
+  maxOccurrences = 6
+) {
+  const paydays: Date[] = [];
+  let cursor = startOfDay(now);
+
+  for (let index = 0; index < maxOccurrences; index += 1) {
+    const nextPayday = getNextPayday(settings, cursor);
+
+    if (!nextPayday || nextPayday > endDate) {
+      break;
+    }
+
+    paydays.push(nextPayday);
+
+    const nextCursor = new Date(nextPayday);
+    nextCursor.setDate(nextCursor.getDate() + 1);
+    cursor = nextCursor;
+  }
+
+  return paydays;
+}
+
+function getCurrentPaycheckReserveAmount(
+  amount: number,
+  dueDate: Date | null,
+  settings: PaycheckSettings,
+  now: Date,
+  nextPayday: Date | null,
+  splitAcrossPaychecks: boolean
+) {
+  if (!dueDate || amount <= 0) return 0;
+
+  if (splitAcrossPaychecks) {
+    const paydaysRemaining = getPaydaysThroughDate(settings, now, dueDate).length;
+    const paycheckSlicesRemaining = Math.max(paydaysRemaining, 1);
+    return amount / paycheckSlicesRemaining;
+  }
+
+  if (!nextPayday) {
+    return amount;
+  }
+
+  return dueDate <= nextPayday ? amount : 0;
 }
 
 function getPaycheckStorageKey(userId: string | null) {
@@ -416,36 +494,36 @@ function simulateDebtPlan(
 }
 
 const DEFAULT_CATEGORIES = [
-  { name: "Groceries", group_name: "Needs", weekly_limit: 100, monthly_limit: 400 },
-  { name: "Transportation", group_name: "Needs", weekly_limit: 20, monthly_limit: 80 },
-  { name: "Car Maintenance", group_name: "Needs", weekly_limit: 0, monthly_limit: 0 },
-  { name: "Emergency Fund", group_name: "Savings", weekly_limit: 21, monthly_limit: 83.34 },
-  { name: "Eating Out", group_name: "Overspending Defense", weekly_limit: 25, monthly_limit: 100 },
-  { name: "Convenience Stores", group_name: "Overspending Defense", weekly_limit: 12.5, monthly_limit: 50 },
-  { name: "Kids", group_name: "Family", weekly_limit: 25, monthly_limit: 100 },
-  { name: "Misc", group_name: "Flexible", weekly_limit: 25, monthly_limit: 100 },
-  { name: "Credit Card Payments", group_name: "Debt", weekly_limit: 0, monthly_limit: 62.97 },
-  { name: "Rent", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 1495 },
-  { name: "Utilities", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 0 },
-  { name: "TV, Phone and Internet", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 50 },
-  { name: "Insurance", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 0 },
-  { name: "Auto Loans", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 293 },
-  { name: "Personal Loans", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 122.83 },
-  { name: "Buy Now, Pay Later", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 577.64 },
-  { name: "Music", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 10.99 },
-  { name: "Netflix and Disney Plus", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 33.54 },
+  { name: "Groceries", group_name: "Needs", weekly_limit: 100, monthly_limit: 400, target_day: null, split_across_paychecks: false },
+  { name: "Transportation", group_name: "Needs", weekly_limit: 20, monthly_limit: 80, target_day: null, split_across_paychecks: false },
+  { name: "Car Maintenance", group_name: "Needs", weekly_limit: 0, monthly_limit: 0, target_day: null, split_across_paychecks: false },
+  { name: "Emergency Fund", group_name: "Savings", weekly_limit: 21, monthly_limit: 83.34, target_day: 31, split_across_paychecks: false },
+  { name: "Eating Out", group_name: "Overspending Defense", weekly_limit: 25, monthly_limit: 100, target_day: null, split_across_paychecks: false },
+  { name: "Convenience Stores", group_name: "Overspending Defense", weekly_limit: 12.5, monthly_limit: 50, target_day: null, split_across_paychecks: false },
+  { name: "Kids", group_name: "Family", weekly_limit: 25, monthly_limit: 100, target_day: null, split_across_paychecks: false },
+  { name: "Misc", group_name: "Flexible", weekly_limit: 25, monthly_limit: 100, target_day: null, split_across_paychecks: false },
+  { name: "Credit Card Payments", group_name: "Debt", weekly_limit: 0, monthly_limit: 62.97, target_day: 23, split_across_paychecks: false },
+  { name: "Rent", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 1495, target_day: 31, split_across_paychecks: true },
+  { name: "Utilities", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 0, target_day: 31, split_across_paychecks: false },
+  { name: "TV, Phone and Internet", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 50, target_day: 23, split_across_paychecks: false },
+  { name: "Insurance", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 0, target_day: 31, split_across_paychecks: false },
+  { name: "Auto Loans", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 293, target_day: 11, split_across_paychecks: false },
+  { name: "Personal Loans", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 122.83, target_day: 19, split_across_paychecks: false },
+  { name: "Buy Now, Pay Later", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 577.64, target_day: 31, split_across_paychecks: false },
+  { name: "Music", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 10.99, target_day: 18, split_across_paychecks: false },
+  { name: "Netflix and Disney Plus", group_name: "Fixed Bills", weekly_limit: 0, monthly_limit: 33.54, target_day: 23, split_across_paychecks: false },
 ];
 
 const DEFAULT_BILLS = [
-  { name: "Rent", amount: 1495, due_day: 31, category: "Rent", counts_toward_available_cash: true },
-  { name: "Utilities", amount: 0, due_day: 31, category: "Utilities", counts_toward_available_cash: true },
-  { name: "TV, Phone and Internet", amount: 50, due_day: 23, category: "TV, Phone and Internet", counts_toward_available_cash: true },
-  { name: "Insurance", amount: 0, due_day: 31, category: "Insurance", counts_toward_available_cash: true },
-  { name: "Auto Loans", amount: 293, due_day: 11, category: "Auto Loans", counts_toward_available_cash: false },
-  { name: "Personal Loans", amount: 122.83, due_day: 19, category: "Personal Loans", counts_toward_available_cash: false },
-  { name: "Buy Now, Pay Later", amount: 577.64, due_day: 31, category: "Buy Now, Pay Later", counts_toward_available_cash: false },
-  { name: "Music", amount: 10.99, due_day: 18, category: "Music", counts_toward_available_cash: true },
-  { name: "Netflix and Disney Plus", amount: 33.54, due_day: 23, category: "Netflix and Disney Plus", counts_toward_available_cash: true },
+  { name: "Rent", amount: 1495, due_day: 31, category: "Rent", counts_toward_available_cash: true, split_across_paychecks: true },
+  { name: "Utilities", amount: 0, due_day: 31, category: "Utilities", counts_toward_available_cash: true, split_across_paychecks: false },
+  { name: "TV, Phone and Internet", amount: 50, due_day: 23, category: "TV, Phone and Internet", counts_toward_available_cash: true, split_across_paychecks: false },
+  { name: "Insurance", amount: 0, due_day: 31, category: "Insurance", counts_toward_available_cash: true, split_across_paychecks: false },
+  { name: "Auto Loans", amount: 293, due_day: 11, category: "Auto Loans", counts_toward_available_cash: false, split_across_paychecks: false },
+  { name: "Personal Loans", amount: 122.83, due_day: 19, category: "Personal Loans", counts_toward_available_cash: false, split_across_paychecks: false },
+  { name: "Buy Now, Pay Later", amount: 577.64, due_day: 31, category: "Buy Now, Pay Later", counts_toward_available_cash: false, split_across_paychecks: false },
+  { name: "Music", amount: 10.99, due_day: 18, category: "Music", counts_toward_available_cash: true, split_across_paychecks: false },
+  { name: "Netflix and Disney Plus", amount: 33.54, due_day: 23, category: "Netflix and Disney Plus", counts_toward_available_cash: true, split_across_paychecks: false },
 ];
 
 const DEFAULT_MONTHLY_INCOME = 4056;
@@ -524,6 +602,15 @@ export default function Home() {
   const [netWorthHistory, setNetWorthHistory] = useState<NetWorthSnapshot[]>([]);
 
   const [amount, setAmount] = useState("");
+  const [transactionMerchant, setTransactionMerchant] = useState("");
+  const [transactionMemo, setTransactionMemo] = useState("");
+  const [transactionAccountId, setTransactionAccountId] = useState("");
+  const [transactionDateInput, setTransactionDateInput] = useState(
+    formatInputDate(new Date())
+  );
+  const [transactionType, setTransactionType] = useState<"income" | "expense">(
+    "expense"
+  );
   const [selectedCategory, setSelectedCategory] = useState("Groceries");
   const [planned, setPlanned] = useState("");
   const [bankBalanceInput, setBankBalanceInput] = useState("");
@@ -531,12 +618,15 @@ export default function Home() {
   const [newCategoryGroup, setNewCategoryGroup] = useState("Flexible");
   const [newCategoryWeeklyLimit, setNewCategoryWeeklyLimit] = useState("");
   const [newCategoryMonthlyLimit, setNewCategoryMonthlyLimit] = useState("");
+  const [newCategoryTargetDay, setNewCategoryTargetDay] = useState("");
+  const [newCategorySplitAcrossPaychecks, setNewCategorySplitAcrossPaychecks] = useState(false);
   const [categoryFormMessage, setCategoryFormMessage] = useState<string | null>(null);
   const [categorySubmitting, setCategorySubmitting] = useState(false);
   const [newBillName, setNewBillName] = useState("");
   const [newBillAmount, setNewBillAmount] = useState("");
   const [newBillDueDay, setNewBillDueDay] = useState("");
   const [newBillCategory, setNewBillCategory] = useState("Rent");
+  const [newBillSplitAcrossPaychecks, setNewBillSplitAcrossPaychecks] = useState(false);
   const [newDebtName, setNewDebtName] = useState("");
   const [newDebtBalance, setNewDebtBalance] = useState("");
   const [newDebtInterest, setNewDebtInterest] = useState("");
@@ -1026,12 +1116,22 @@ export default function Home() {
   const addTransaction = async () => {
     if (!amount || !userId) return;
 
+    const normalizedAmount = Math.abs(Number(amount));
+    const trimmedMerchant = transactionMerchant.trim();
+    const trimmedMemo = transactionMemo.trim();
+    const activeTransactionAccountId = transactionAccountId || accounts[0]?.id || "";
+
     const { data, error } = await supabase
       .from("transactions")
       .insert([
         {
-          amount: Number(amount),
+          amount: normalizedAmount,
           category: selectedCategory,
+          merchant: trimmedMerchant || null,
+          memo: trimmedMemo || null,
+          account_id: activeTransactionAccountId || null,
+          transaction_date: transactionDateInput || null,
+          transaction_type: transactionType,
           user_id: userId,
         },
       ])
@@ -1043,6 +1143,11 @@ export default function Home() {
         userId,
         amount,
         selectedCategory,
+        merchant: trimmedMerchant || null,
+        memo: trimmedMemo || null,
+        accountId: activeTransactionAccountId || null,
+        transactionDate: transactionDateInput || null,
+        transactionType,
       });
       setSyncError(getErrorMessage(error));
       return;
@@ -1051,6 +1156,10 @@ export default function Home() {
     if (data) setTransactions([data, ...transactions]);
     setSyncError(null);
     setAmount("");
+    setTransactionMerchant("");
+    setTransactionMemo("");
+    setTransactionDateInput(formatInputDate(new Date()));
+    setTransactionType("expense");
   };
 
   const updateMainBalance = async () => {
@@ -1393,7 +1502,7 @@ export default function Home() {
 
   const updateBillField = (
     billId: string,
-    field: keyof Pick<RecurringBill, "name" | "amount" | "due_day" | "category" | "counts_toward_available_cash">,
+    field: keyof Pick<RecurringBill, "name" | "amount" | "due_day" | "category" | "counts_toward_available_cash" | "split_across_paychecks">,
     value: string | boolean
   ) => {
     setBills((currentBills) =>
@@ -1404,7 +1513,8 @@ export default function Home() {
               [field]:
                 field === "name" || field === "category"
                   ? value
-                  : field === "counts_toward_available_cash"
+                  : field === "counts_toward_available_cash" ||
+                      field === "split_across_paychecks"
                     ? Boolean(value)
                   : Number(value === "" ? 0 : value),
             }
@@ -1422,6 +1532,7 @@ export default function Home() {
         due_day: Number(bill.due_day),
         category: bill.category.trim(),
         counts_toward_available_cash: bill.counts_toward_available_cash ?? true,
+        split_across_paychecks: bill.split_across_paychecks ?? false,
       })
       .eq("id", bill.id)
       .select()
@@ -1474,6 +1585,7 @@ export default function Home() {
           due_day: dueDay,
           category: trimmedCategory,
           counts_toward_available_cash: true,
+          split_across_paychecks: newBillSplitAcrossPaychecks,
         },
       ])
       .select()
@@ -1497,13 +1609,14 @@ export default function Home() {
     setNewBillName("");
     setNewBillAmount("");
     setNewBillDueDay("");
+    setNewBillSplitAcrossPaychecks(false);
     setSyncError(null);
   };
 
   const updateCategoryField = (
     categoryId: string,
-    field: keyof Pick<BudgetCategory, "name" | "group_name" | "weekly_limit" | "monthly_limit">,
-    value: string
+    field: keyof Pick<BudgetCategory, "name" | "group_name" | "weekly_limit" | "monthly_limit" | "target_day" | "split_across_paychecks">,
+    value: string | boolean
   ) => {
     setCategories((currentCategories) =>
       currentCategories.map((category) =>
@@ -1513,7 +1626,11 @@ export default function Home() {
               [field]:
                 field === "name" || field === "group_name"
                   ? value
-                  : Number(value === "" ? 0 : value),
+                  : field === "split_across_paychecks"
+                    ? Boolean(value)
+                  : field === "target_day"
+                    ? (value === "" ? null : Number(value))
+                    : Number(value === "" ? 0 : value),
             }
           : category
       )
@@ -1528,6 +1645,8 @@ export default function Home() {
         group_name: category.group_name.trim(),
         weekly_limit: Number(category.weekly_limit),
         monthly_limit: Number(category.monthly_limit),
+        target_day: category.target_day ? Number(category.target_day) : null,
+        split_across_paychecks: category.split_across_paychecks ?? false,
       })
       .eq("id", category.id)
       .select()
@@ -1627,12 +1746,18 @@ export default function Home() {
   );
   const weeklyLimitValue = Number(newCategoryWeeklyLimit || 0);
   const monthlyLimitValue = Number(newCategoryMonthlyLimit || 0);
+  const categoryTargetDayValue = newCategoryTargetDay === "" ? null : Number(newCategoryTargetDay);
   const categoryFormError = !trimmedNewCategoryName
     ? "Category name is required."
     : categoryNameExists
       ? "That category already exists."
       : weeklyLimitValue < 0 || monthlyLimitValue < 0
         ? "Weekly and monthly limits must be zero or higher."
+        : categoryTargetDayValue !== null &&
+            (Number.isNaN(categoryTargetDayValue) ||
+              categoryTargetDayValue < 1 ||
+              categoryTargetDayValue > 31)
+          ? "Target day must be between 1 and 31."
         : null;
   const canSubmitCategory = !categorySubmitting && !categoryFormError;
 
@@ -1656,6 +1781,8 @@ export default function Home() {
           group_name: trimmedNewCategoryGroup,
           weekly_limit: weeklyLimitValue,
           monthly_limit: monthlyLimitValue,
+          target_day: categoryTargetDayValue,
+          split_across_paychecks: newCategorySplitAcrossPaychecks,
           priority: categories.length + 1,
           rollover: false,
         },
@@ -1670,6 +1797,8 @@ export default function Home() {
         group_name: trimmedNewCategoryGroup,
         weekly_limit: weeklyLimitValue,
         monthly_limit: monthlyLimitValue,
+        target_day: categoryTargetDayValue,
+        split_across_paychecks: newCategorySplitAcrossPaychecks,
       });
       setCategorySubmitting(false);
       setCategoryFormMessage(getErrorMessage(error));
@@ -1686,6 +1815,8 @@ export default function Home() {
     setNewCategoryGroup("Flexible");
     setNewCategoryWeeklyLimit("");
     setNewCategoryMonthlyLimit("");
+    setNewCategoryTargetDay("");
+    setNewCategorySplitAcrossPaychecks(false);
     setCategoryFormMessage(`Saved ${data?.name || "category"}.`);
     setCategorySubmitting(false);
     setSyncError(null);
@@ -1700,11 +1831,11 @@ export default function Home() {
   const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
   const weeklyTransactions = transactions.filter(
-    (t) => new Date(t.created_at) >= startOfWeek
+    (t) => getTransactionDate(t) >= startOfWeek
   );
 
   const monthlyTransactions = transactions.filter(
-    (t) => new Date(t.created_at) >= startOfMonth
+    (t) => getTransactionDate(t) >= startOfMonth
   );
 
   const weeklyBudgetTotal = categories.reduce(
@@ -1718,12 +1849,12 @@ export default function Home() {
   );
 
   const weeklySpentTotal = weeklyTransactions.reduce(
-    (sum, tx) => sum + Number(tx.amount),
+    (sum, tx) => sum + getTransactionExpenseAmount(tx),
     0
   );
 
   const monthlySpentTotal = monthlyTransactions.reduce(
-    (sum, tx) => sum + Number(tx.amount),
+    (sum, tx) => sum + getTransactionExpenseAmount(tx),
     0
   );
   const monthlyIncome = Number(monthlyIncomeInput || 0);
@@ -1731,19 +1862,25 @@ export default function Home() {
   const daysUntilNextPayday = nextPayday ? diffInDays(now, nextPayday) : null;
 
   const currentBankBalance = accounts[0]?.current_balance || 0;
+  const activeTransactionAccountId = transactionAccountId || accounts[0]?.id || "";
 
   const billsReservedForAvailableCash = bills
     .filter(
-      (bill) =>
-        !bill.is_paid &&
-        (bill.counts_toward_available_cash ?? true) &&
-        (
-          nextPayday
-            ? getNextDueDate(Number(bill.due_day || 1), now) <= nextPayday
-            : true
-        )
+      (bill) => !bill.is_paid && (bill.counts_toward_available_cash ?? true)
     )
-    .reduce((sum, bill) => sum + Number(bill.amount), 0);
+    .reduce((sum, bill) => {
+      const dueDate = getNextDueDate(Number(bill.due_day || 1), now);
+      const reserveAmount = getCurrentPaycheckReserveAmount(
+        Number(bill.amount || 0),
+        dueDate,
+        paycheckSettings,
+        now,
+        nextPayday,
+        bill.split_across_paychecks ?? false
+      );
+
+      return sum + reserveAmount;
+    }, 0);
 
   const protectedBuffer = 50;
 
@@ -1759,11 +1896,11 @@ export default function Home() {
   const categoryRows = categories.map((cat) => {
     const weeklySpent = weeklyTransactions
       .filter((tx) => tx.category === cat.name)
-      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+      .reduce((sum, tx) => sum + getTransactionExpenseAmount(tx), 0);
 
     const monthlySpent = monthlyTransactions
       .filter((tx) => tx.category === cat.name)
-      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+      .reduce((sum, tx) => sum + getTransactionExpenseAmount(tx), 0);
 
     const weeklyRemaining = Number(cat.weekly_limit) - weeklySpent;
     const monthlyRemaining = Number(cat.monthly_limit) - monthlySpent;
@@ -1845,10 +1982,10 @@ export default function Home() {
     nextDay.setDate(day.getDate() + 1);
     const spent = transactions
       .filter((tx) => {
-        const txDate = new Date(tx.created_at);
+        const txDate = getTransactionDate(tx);
         return txDate >= day && txDate < nextDay;
       })
-      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+      .reduce((sum, tx) => sum + getTransactionExpenseAmount(tx), 0);
 
     return {
       label: day.toLocaleDateString("en-US", { weekday: "short" }),
@@ -1861,12 +1998,12 @@ export default function Home() {
   const accountBalanceTrend = lastSevenDays.map((day) => {
     const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (6 - lastSevenDays.findIndex((entry) => entry.label === day.label)) + 1);
     const spendingAfterDay = transactions
-      .filter((tx) => new Date(tx.created_at) >= dayEnd)
-      .reduce((sum, tx) => sum + Number(tx.amount), 0);
+      .filter((tx) => getTransactionDate(tx) >= dayEnd)
+      .reduce((sum, tx) => sum + getTransactionSignedAmount(tx), 0);
 
     return {
       ...day,
-      balance: currentBankBalance + spendingAfterDay,
+      balance: currentBankBalance - spendingAfterDay,
     };
   });
   const maxBalanceTrend = Math.max(
@@ -1893,6 +2030,17 @@ export default function Home() {
       const key = `bill:${bill.id}`;
       const target = Number(bill.amount || 0);
       const assigned = Number(assignedBudget[key] || 0);
+      const dueDate = getNextDueDate(Number(bill.due_day || 1), now);
+      const reserveAmount = getCurrentPaycheckReserveAmount(
+        target,
+        dueDate,
+        paycheckSettings,
+        now,
+        nextPayday,
+        bill.split_across_paychecks ?? false
+      );
+      const isSplitBill =
+        (bill.split_across_paychecks ?? false) && reserveAmount > 0 && reserveAmount < target;
 
       return {
         key,
@@ -1900,11 +2048,15 @@ export default function Home() {
         name: bill.name,
         target,
         assigned,
+        reserveAmount,
+        dueDate,
         activity: 0,
         available: assigned,
         needed: Math.max(target - assigned, 0),
         detail:
-          target > 0
+          isSplitBill
+            ? `${formatCurrency(reserveAmount)} to set aside this paycheck • ${formatCurrency(Math.max(target - assigned, 0))} total still needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`
+            : target > 0
             ? `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`
             : `No target set for the ${bill.due_day}${getDaySuffix(Number(bill.due_day))} due date.`,
         sortOrder: Number(bill.due_day || 99),
@@ -1918,6 +2070,25 @@ export default function Home() {
       const assigned = Number(assignedBudget[key] || 0);
       const matchedCategoryRow = categoryRows.find((row) => row.id === category.id);
       const activity = Number(matchedCategoryRow?.monthlySpent || 0);
+      const targetDate =
+        category.target_day && category.target_day > 0
+          ? getNextDueDate(Number(category.target_day), now)
+          : null;
+      const reserveAmount =
+        (category.split_across_paychecks ?? false) && targetDate
+          ? getCurrentPaycheckReserveAmount(
+              target,
+              targetDate,
+              paycheckSettings,
+              now,
+              nextPayday,
+              category.split_across_paychecks ?? false
+            )
+          : target;
+      const reservesBeforePayday =
+        Boolean(targetDate && nextPayday && targetDate <= nextPayday) ||
+        category.group_name === "Savings" ||
+        ((category.split_across_paychecks ?? false) && reserveAmount > 0);
 
       return {
         key,
@@ -1925,10 +2096,22 @@ export default function Home() {
         name: category.name,
         target,
         assigned,
+        targetDay: category.target_day ?? null,
+        targetDate,
+        reserveAmount,
+        reservesBeforePayday,
         activity,
         available: assigned - activity,
         needed: Math.max(target - assigned, 0),
-        detail: `${formatCurrency(Math.max(target - assigned, 0))} more needed this month`,
+        detail:
+          (category.split_across_paychecks ?? false) &&
+          category.target_day &&
+          reserveAmount > 0 &&
+          reserveAmount < target
+            ? `${formatCurrency(reserveAmount)} to set aside this paycheck • ${formatCurrency(Math.max(target - assigned, 0))} total still needed by the ${category.target_day}${getDaySuffix(Number(category.target_day))}`
+            : category.target_day && category.target_day > 0
+            ? `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${category.target_day}${getDaySuffix(Number(category.target_day))}`
+            : `${formatCurrency(Math.max(target - assigned, 0))} more needed this month`,
         sortOrder: Number(category.priority || 999),
       };
     })
@@ -1970,21 +2153,46 @@ export default function Home() {
     const remaining = Math.max(fundedTarget - cat.monthlySpent, 0);
     return sum + remaining;
   }, 0);
-  const assignedGoalReserve = categoryBudgetItems
-    .filter((item) => item.group === "Savings")
-    .reduce((sum, item) => sum + Math.max(item.assigned, 0), 0);
+  const assignedGoalReserve = categoryBudgetItems.reduce((sum, item) => {
+    const matchedCategory = categories.find((category) => category.id === item.key.replace("category:", ""));
+    const nextTargetDate =
+      matchedCategory?.target_day && nextPayday
+        ? getNextDueDate(Number(matchedCategory.target_day), now)
+        : null;
+
+    if (item.group === "Savings") {
+      if (!matchedCategory?.target_day) {
+        return sum + Math.max(item.assigned, 0);
+      }
+
+      return nextTargetDate && nextTargetDate <= nextPayday
+        ? sum + Math.max(item.assigned, 0)
+        : sum;
+    }
+
+    if (
+      matchedCategory?.target_day &&
+      item.group !== "Debt" &&
+      item.group !== "Fixed Bills" &&
+      nextTargetDate &&
+      nextTargetDate <= nextPayday
+    ) {
+      return sum + Math.max(item.assigned, 0);
+    }
+
+    return sum;
+  }, 0);
   const upcomingBillsBeforePayday = billBudgetItems.filter((bill) => {
-    if (!nextPayday) return false;
     const matchedBill = bills.find((item) => `bill:${item.id}` === bill.key);
     if (!matchedBill || matchedBill.is_paid) return false;
     if (!(matchedBill.counts_toward_available_cash ?? true)) {
       return false;
     }
-    const dueDate = getNextDueDate(Number(matchedBill.due_day || 1), now);
-    return dueDate <= nextPayday;
+
+    return Number(bill.reserveAmount || 0) > 0;
   });
   const upcomingBillsBeforePaydayTotal = upcomingBillsBeforePayday.reduce(
-    (sum, bill) => sum + bill.target,
+    (sum, bill) => sum + Number(bill.reserveAmount || bill.target || 0),
     0
   );
   const cashReservedUntilPayday =
@@ -1997,7 +2205,7 @@ export default function Home() {
   const dailyCashAllowance = cashAvailableUntilPayday / daysUntilPaydayWindow;
   const dailyFundedAllowance = fundedSpendingRemaining / daysUntilPaydayWindow;
   const dailyUnassignedAllowance = Math.max(readyToAssign, 0) / daysUntilPaydayWindow;
-  const dailySafeToSpend = Math.min(
+  const dailySafeToSpendBase = Math.min(
     dailyCashAllowance,
     dailyFundedAllowance + dailyUnassignedAllowance
   );
@@ -2008,11 +2216,12 @@ export default function Home() {
   );
   const daysRemainingThisWeek = Math.max(6 - now.getDay() + 1, 1);
   const safeThisWeek = Math.min(
-    dailySafeToSpend * daysRemainingThisWeek,
+    dailySafeToSpendBase * daysRemainingThisWeek,
     weeklyFundedSpendAllowance,
     weeklyBudgetCapRemaining,
     cashAvailableUntilPayday
   );
+  const dailySafeToSpend = Math.min(dailySafeToSpendBase, safeThisWeek);
   const safeToSpend = Math.min(
     safeThisWeek,
     Math.max(availableCash, 0)
@@ -2057,6 +2266,11 @@ export default function Home() {
               day: "numeric",
             })
           : "--",
+        reserveLabel:
+          Number(bill.reserveAmount || 0) > 0 &&
+          Number(bill.reserveAmount || 0) < Number(bill.target || 0)
+            ? `${formatCurrency(Number(bill.reserveAmount || 0))} reserved this paycheck`
+            : formatCurrency(Number(bill.target || 0)),
         postBillCash,
       };
     });
@@ -2365,12 +2579,12 @@ export default function Home() {
                   onClick={() => selectMobileTab(tab.id)}
                   className={
                     activeMobileTab === tab.id
-                      ? "flex min-w-[88px] items-center justify-center gap-2 rounded-full border border-cyan-400 bg-cyan-400/15 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
-                      : "flex min-w-[88px] items-center justify-center gap-2 rounded-full border border-slate-700 bg-slate-950/50 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-slate-400 transition-all duration-200"
+                      ? "flex min-w-[96px] items-center justify-center gap-2 rounded-full border border-cyan-400 bg-cyan-400/15 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
+                      : "flex min-w-[96px] items-center justify-center gap-2 rounded-full border border-slate-700 bg-slate-950/50 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 transition-all duration-200"
                   }
                 >
                   <span className="text-sm leading-none">{tab.icon}</span>
-                  {tab.label}
+                  <span className="whitespace-nowrap leading-none">{tab.label}</span>
                 </button>
               ))}
             </div>
@@ -2585,10 +2799,10 @@ export default function Home() {
                 </p>
               </div>
               <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
-                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Bills before payday</p>
+                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Reserved this paycheck</p>
                 <p className="mt-2 text-lg text-slate-50">{formatCurrency(upcomingBillsBeforePaydayTotal)}</p>
                 <p className="text-xs text-gray-500">
-                  {upcomingBillsBeforePayday.length} upcoming bill{upcomingBillsBeforePayday.length === 1 ? "" : "s"}
+                  {upcomingBillsBeforePayday.length} reserved item{upcomingBillsBeforePayday.length === 1 ? "" : "s"}
                 </p>
               </div>
             </div>
@@ -2635,7 +2849,7 @@ export default function Home() {
                       <p className="text-xs text-gray-500">Due {bill.dueLabel}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-sm text-slate-50">{formatCurrency(bill.target)}</p>
+                      <p className="text-sm text-slate-50">{bill.reserveLabel}</p>
                       <p className={bill.postBillCash < 0 ? "text-xs text-red-400" : "text-xs text-cyan-300"}>
                         {formatCurrency(bill.postBillCash)} after bill
                       </p>
@@ -2729,6 +2943,10 @@ export default function Home() {
             <p className="text-xs text-gray-500">{formatMonthYear(now)}</p>
           </div>
 
+          <p className="mt-2 text-xs text-gray-500">
+            Bill amounts and due dates are managed in <span className="text-slate-300">Recurring Bills</span>. This budget view is for assigning money to those bills and categories, not creating duplicate bill targets.
+          </p>
+
           <div className="mt-3 space-y-4">
             {zeroBasedGroups.map((group) => (
               <div key={group.name} className="rounded-xl border border-gray-800 bg-black/30 p-3">
@@ -2742,10 +2960,32 @@ export default function Home() {
                 <div className="mt-3 space-y-3">
                   {group.items.map((item) => (
                     <div key={item.key} className="rounded-xl bg-[#0A0F1C] p-3">
+                      {(() => {
+                        const isManagedBill = item.key.startsWith("bill:");
+
+                        return (
+                          <>
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <p>{item.name}</p>
                           <p className="text-xs text-gray-400">{item.detail}</p>
+                          {"targetDay" in item ? (
+                            <p
+                              className={
+                                item.reservesBeforePayday
+                                  ? "mt-1 text-[11px] text-cyan-300"
+                                  : item.targetDay
+                                    ? "mt-1 text-[11px] text-amber-300"
+                                    : "mt-1 text-[11px] text-gray-500"
+                              }
+                            >
+                              {item.targetDay
+                                ? item.reservesBeforePayday
+                                  ? `Reserved before payday on the ${item.targetDay}${getDaySuffix(Number(item.targetDay))}`
+                                  : `Future target on the ${item.targetDay}${getDaySuffix(Number(item.targetDay))} after next payday`
+                                : "No target day set"}
+                            </p>
+                          ) : null}
                         </div>
                         <div className="text-right">
                           <p>{formatCurrency(item.assigned)}</p>
@@ -2773,9 +3013,14 @@ export default function Home() {
                       <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
                         <input
                           value={String(item.target)}
-                          onChange={(e) => updateBudgetItemTarget(item.key, e.target.value)}
                           type="number"
-                          className="rounded-lg border border-gray-700 bg-black p-2"
+                          onChange={(e) => updateBudgetItemTarget(item.key, e.target.value)}
+                          readOnly={isManagedBill}
+                          className={
+                            isManagedBill
+                              ? "rounded-lg border border-gray-800 bg-slate-950/60 p-2 text-gray-500"
+                              : "rounded-lg border border-gray-700 bg-black p-2"
+                          }
                         />
                         <input
                           value={String(item.assigned)}
@@ -2783,12 +3028,21 @@ export default function Home() {
                           type="number"
                           className="rounded-lg border border-gray-700 bg-black p-2"
                         />
-                        <button
-                          onClick={() => void saveBudgetItemTarget(item.key)}
-                          className="rounded-lg border border-slate-600 px-3 py-2 text-slate-300"
-                        >
-                          Save Target
-                        </button>
+                        {isManagedBill ? (
+                          <button
+                            onClick={() => selectMobileTab("bills")}
+                            className="rounded-lg border border-slate-600 px-3 py-2 text-slate-300"
+                          >
+                            Edit In Bills
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => void saveBudgetItemTarget(item.key)}
+                            className="rounded-lg border border-slate-600 px-3 py-2 text-slate-300"
+                          >
+                            Save Target
+                          </button>
+                        )}
                         <button
                           onClick={() => fundItem(item.key, Math.min(item.needed, Math.max(readyToAssign, 0)))}
                           className="rounded-lg border border-cyan-400 px-3 py-2 text-cyan-300"
@@ -2796,6 +3050,9 @@ export default function Home() {
                           Fund
                         </button>
                       </div>
+                          </>
+                        );
+                      })()}
                     </div>
                   ))}
                 </div>
@@ -2824,6 +3081,29 @@ export default function Home() {
         <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
           <p className="text-sm text-gray-400">Quick Add Transaction</p>
 
+          <div className="grid grid-cols-2 gap-2 rounded-xl border border-gray-800 bg-black/20 p-1 text-xs uppercase tracking-[0.16em] text-gray-400">
+            <button
+              onClick={() => setTransactionType("expense")}
+              className={
+                transactionType === "expense"
+                  ? "rounded-lg bg-red-500/15 px-3 py-2 text-red-300"
+                  : "rounded-lg px-3 py-2"
+              }
+            >
+              Expense
+            </button>
+            <button
+              onClick={() => setTransactionType("income")}
+              className={
+                transactionType === "income"
+                  ? "rounded-lg bg-emerald-500/15 px-3 py-2 text-emerald-300"
+                  : "rounded-lg px-3 py-2"
+              }
+            >
+              Income
+            </button>
+          </div>
+
           <select
             value={selectedCategory}
             onChange={(e) => setSelectedCategory(e.target.value)}
@@ -2845,9 +3125,44 @@ export default function Home() {
           </select>
 
           <input
+            value={transactionMerchant}
+            onChange={(e) => setTransactionMerchant(e.target.value)}
+            placeholder="Merchant or source"
+            className="w-full rounded-xl bg-black border border-gray-700 p-3"
+          />
+
+          <textarea
+            value={transactionMemo}
+            onChange={(e) => setTransactionMemo(e.target.value)}
+            placeholder="Memo"
+            rows={2}
+            className="w-full rounded-xl bg-black border border-gray-700 p-3"
+          />
+
+          <select
+            value={activeTransactionAccountId}
+            onChange={(e) => setTransactionAccountId(e.target.value)}
+            className="w-full rounded-xl bg-black border border-gray-700 p-3"
+          >
+            <option value="">No account</option>
+            {accounts.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.name}
+              </option>
+            ))}
+          </select>
+
+          <input
+            value={transactionDateInput}
+            onChange={(e) => setTransactionDateInput(e.target.value)}
+            type="date"
+            className="w-full rounded-xl bg-black border border-gray-700 p-3"
+          />
+
+          <input
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
-            placeholder="Amount"
+            placeholder={transactionType === "income" ? "Income amount" : "Expense amount"}
             type="number"
             className="w-full rounded-xl bg-black border border-gray-700 p-3"
           />
@@ -2925,7 +3240,38 @@ export default function Home() {
                 className="w-full rounded-xl bg-black border border-gray-700 p-3"
               />
             </label>
+
+            <label className="text-sm text-gray-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                Target Day
+              </span>
+              <input
+                value={newCategoryTargetDay}
+                onChange={(e) => {
+                  setNewCategoryTargetDay(e.target.value);
+                  setCategoryFormMessage(null);
+                }}
+                placeholder="Optional day of month"
+                type="number"
+                min="1"
+                max="31"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+            </label>
           </div>
+
+          <label className="flex items-center justify-between rounded-xl border border-gray-800 bg-black/30 px-4 py-3 text-sm text-gray-300">
+            <span>Split Across Paychecks</span>
+            <input
+              checked={newCategorySplitAcrossPaychecks}
+              onChange={(e) => {
+                setNewCategorySplitAcrossPaychecks(e.target.checked);
+                setCategoryFormMessage(null);
+              }}
+              type="checkbox"
+              className="h-4 w-4 accent-cyan-400"
+            />
+          </label>
 
           <div className="rounded-xl border border-gray-800 bg-black/30 p-3 text-xs text-gray-400">
             <p>Name a spending bucket, choose its group, and optionally set weekly or monthly targets.</p>
@@ -2991,6 +3337,15 @@ export default function Home() {
             <p className="mt-3 text-xs text-gray-500">
               New bills count toward Available Cash by default. Toggle them off below for debt-style obligations.
             </p>
+            <label className="mt-3 flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
+              <span>Split Across Paychecks</span>
+              <input
+                checked={newBillSplitAcrossPaychecks}
+                onChange={(e) => setNewBillSplitAcrossPaychecks(e.target.checked)}
+                type="checkbox"
+                className="h-4 w-4 accent-cyan-400"
+              />
+            </label>
             <button
               onClick={addRecurringBill}
               className="mt-3 w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
@@ -3041,6 +3396,21 @@ export default function Home() {
                       className="h-4 w-4 accent-cyan-400"
                     />
                   </label>
+                  <label className="col-span-2 flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
+                    <span>Split Across Paychecks</span>
+                    <input
+                      checked={bill.split_across_paychecks ?? false}
+                      onChange={(e) =>
+                        updateBillField(
+                          bill.id,
+                          "split_across_paychecks",
+                          e.target.checked
+                        )
+                      }
+                      type="checkbox"
+                      className="h-4 w-4 accent-cyan-400"
+                    />
+                  </label>
                 </div>
                 <button
                   onClick={() => saveBill(bill)}
@@ -3083,6 +3453,30 @@ export default function Home() {
                     placeholder="Monthly limit"
                     className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
                   />
+                  <input
+                    value={category.target_day ? String(category.target_day) : ""}
+                    onChange={(e) => updateCategoryField(category.id, "target_day", e.target.value)}
+                    type="number"
+                    min="1"
+                    max="31"
+                    placeholder="Target day"
+                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                  />
+                  <label className="col-span-2 flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
+                    <span>Split Across Paychecks</span>
+                    <input
+                      checked={category.split_across_paychecks ?? false}
+                      onChange={(e) =>
+                        updateCategoryField(
+                          category.id,
+                          "split_across_paychecks",
+                          e.target.checked
+                        )
+                      }
+                      type="checkbox"
+                      className="h-4 w-4 accent-cyan-400"
+                    />
+                  </label>
                 </div>
                 <button
                   onClick={() => saveCategory(category)}
@@ -3662,15 +4056,35 @@ export default function Home() {
             {transactions.slice(0, 8).map((tx) => (
               <div key={tx.id} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-2 text-sm">
                 <div>
-                  <p className="text-slate-50">{tx.category}</p>
+                  <p className="text-slate-50">
+                    {tx.merchant?.trim() || tx.category}
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    {tx.category}
+                    {tx.account_id
+                      ? ` • ${accounts.find((account) => account.id === tx.account_id)?.name || "Account"}`
+                      : ""}
+                  </p>
+                  {tx.memo ? (
+                    <p className="text-xs text-gray-500">{tx.memo}</p>
+                  ) : null}
                   <p className="text-xs text-gray-500">
-                    {new Date(tx.created_at).toLocaleDateString("en-US", {
+                    {getTransactionDate(tx).toLocaleDateString("en-US", {
                       month: "short",
                       day: "numeric",
                     })}
                   </p>
                 </div>
-                <span className="text-red-300">-${Number(tx.amount).toFixed(2)}</span>
+                <span
+                  className={
+                    getTransactionType(tx) === "income"
+                      ? "text-emerald-300"
+                      : "text-red-300"
+                  }
+                >
+                  {getTransactionType(tx) === "income" ? "+" : "-"}
+                  {formatCurrency(Math.abs(Number(tx.amount || 0)))}
+                </span>
               </div>
             ))}
             {transactions.length === 0 ? (
@@ -3689,12 +4103,12 @@ export default function Home() {
               onClick={() => selectMobileTab(tab.id)}
               className={
                 activeMobileTab === tab.id
-                  ? "flex flex-col items-center justify-center gap-1 rounded-2xl border border-cyan-400 bg-cyan-400/15 px-2 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
-                  : "flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-800 bg-slate-950/40 px-2 py-2 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500 transition-all duration-200"
+                  ? "flex flex-col items-center justify-center gap-1 rounded-2xl border border-cyan-400 bg-cyan-400/15 px-2 py-2 text-[10px] font-medium uppercase tracking-[0.1em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
+                  : "flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-800 bg-slate-950/40 px-2 py-2 text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500 transition-all duration-200"
               }
             >
               <span className="text-sm leading-none">{tab.icon}</span>
-              {tab.label}
+              <span className="whitespace-nowrap text-center leading-none">{tab.label}</span>
             </button>
           ))}
         </div>
