@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
@@ -75,6 +76,11 @@ type BudgetAssignmentRow = {
   assigned: number;
 };
 
+type MonthlyBudgetStateRow = {
+  month_key: string;
+  monthly_income: number | null;
+};
+
 type PayScheduleType = "weekly" | "biweekly" | "twice_monthly" | "monthly";
 
 type PaycheckSettingsRow = {
@@ -94,6 +100,15 @@ type PaycheckSettings = {
 };
 
 type MobileTab = "home" | "budget" | "spending" | "bills" | "plan";
+type IconName =
+  | "home"
+  | "budget"
+  | "spending"
+  | "bills"
+  | "plan"
+  | "success"
+  | "warning"
+  | "info";
 
 function normalizeError(error: unknown) {
   if (!error) {
@@ -150,6 +165,217 @@ function formatCurrency(amount: number) {
   return `$${amount.toFixed(2)}`;
 }
 
+function AppIcon({
+  name,
+  className = "h-4 w-4",
+}: {
+  name: IconName;
+  className?: string;
+}) {
+  const sharedProps = {
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+
+  switch (name) {
+    case "home":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <path {...sharedProps} d="M3 10.5 12 3l9 7.5" />
+          <path {...sharedProps} d="M5.5 9.5V21h13V9.5" />
+          <path {...sharedProps} d="M9.5 21v-6h5v6" />
+        </svg>
+      );
+    case "budget":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <rect {...sharedProps} x="3" y="5" width="18" height="14" rx="2.5" />
+          <path {...sharedProps} d="M3 9h18" />
+          <path {...sharedProps} d="M8 14h3M14 14h2" />
+        </svg>
+      );
+    case "spending":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <path {...sharedProps} d="M4 7h16" />
+          <path {...sharedProps} d="M6.5 7 8 4h8l1.5 3" />
+          <path {...sharedProps} d="M5 7v10a3 3 0 0 0 3 3h8a3 3 0 0 0 3-3V7" />
+          <path {...sharedProps} d="M12 10v6M9 13h6" />
+        </svg>
+      );
+    case "bills":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <rect {...sharedProps} x="4" y="3.5" width="16" height="17" rx="2.5" />
+          <path {...sharedProps} d="M8 2.5v3M16 2.5v3M4 8.5h16" />
+          <path {...sharedProps} d="M8 12h8M8 16h5" />
+        </svg>
+      );
+    case "plan":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <path {...sharedProps} d="M12 3v18" />
+          <path {...sharedProps} d="m5 8 7 4 7-4" />
+          <path {...sharedProps} d="m5 16 7-4 7 4" />
+        </svg>
+      );
+    case "success":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <circle {...sharedProps} cx="12" cy="12" r="9" />
+          <path {...sharedProps} d="m8.5 12.5 2.3 2.3 4.7-5.3" />
+        </svg>
+      );
+    case "warning":
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <path {...sharedProps} d="M12 4 3.5 19h17L12 4Z" />
+          <path {...sharedProps} d="M12 9v4.5M12 17h.01" />
+        </svg>
+      );
+    default:
+      return (
+        <svg viewBox="0 0 24 24" className={className} aria-hidden="true">
+          <circle {...sharedProps} cx="12" cy="12" r="9" />
+          <path {...sharedProps} d="M12 10v5M12 7h.01" />
+        </svg>
+      );
+  }
+}
+
+const dashboardPanelClass =
+  "rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]";
+
+function DashboardPanel({
+  className = "",
+  title,
+  subtitle,
+  right,
+  children,
+}: {
+  className?: string;
+  title: string;
+  subtitle?: string;
+  right?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`${dashboardPanelClass} ${className}`.trim()}>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm text-gray-400">{title}</p>
+          {subtitle ? (
+            <p className="mt-1 text-xs text-gray-500">{subtitle}</p>
+          ) : null}
+        </div>
+        {right}
+      </div>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function EmptyState({
+  children,
+  tone = "default",
+  className = "",
+}: {
+  children: ReactNode;
+  tone?: "default" | "warning";
+  className?: string;
+}) {
+  const toneClass =
+    tone === "warning"
+      ? "border-red-400/20"
+      : "border-slate-700";
+
+  return (
+    <div
+      className={`rounded-2xl border border-dashed ${toneClass} bg-black/20 p-4 text-sm text-gray-500 ${className}`.trim()}
+    >
+      {children}
+    </div>
+  );
+}
+
+function MetricCard({
+  label,
+  value,
+  detail,
+  valueClassName = "mt-2 text-2xl text-slate-50",
+  className = "",
+}: {
+  label: string;
+  value: ReactNode;
+  detail?: ReactNode;
+  valueClassName?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4 ${className}`.trim()}
+    >
+      <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+        {label}
+      </p>
+      <p className={valueClassName}>{value}</p>
+      {detail ? <p className="mt-1 text-xs text-gray-500">{detail}</p> : null}
+    </div>
+  );
+}
+
+function FieldLabel({
+  label,
+  helper,
+  className = "",
+  children,
+}: {
+  label: string;
+  helper?: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className={`block text-sm text-gray-300 ${className}`.trim()}>
+      <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+        {label}
+      </span>
+      {children}
+      {helper ? <span className="mt-2 block text-xs text-gray-500">{helper}</span> : null}
+    </label>
+  );
+}
+
+function ActionButton({
+  children,
+  className = "",
+  tone = "secondary",
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  tone?: "primary" | "secondary" | "ghost" | "danger";
+}) {
+  const toneClass =
+    tone === "primary"
+      ? "border-cyan-400 bg-cyan-400 text-black"
+      : tone === "danger"
+        ? "border-red-500/50 text-red-300"
+        : tone === "ghost"
+          ? "border-gray-600 text-gray-300"
+          : "border-cyan-400 text-cyan-300";
+
+  return (
+    <button
+      {...props}
+      className={`rounded-xl border px-4 py-2 transition ${toneClass} ${className}`.trim()}
+    >
+      {children}
+    </button>
+  );
+}
+
 function getTransactionType(transaction: Transaction) {
   return transaction.transaction_type === "income" ? "income" : "expense";
 }
@@ -169,6 +395,42 @@ function getTransactionExpenseAmount(transaction: Transaction) {
   return getTransactionType(transaction) === "expense"
     ? Math.abs(Number(transaction.amount || 0))
     : 0;
+}
+
+function normalizeMerchantName(value: string | null | undefined) {
+  return (value || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function detectRecurringCadence(transactions: Transaction[]) {
+  if (transactions.length < 3) return null;
+
+  const sortedDates = transactions
+    .map((transaction) => startOfDay(getTransactionDate(transaction)).getTime())
+    .sort((a, b) => a - b);
+  const intervals: number[] = [];
+
+  for (let index = 1; index < sortedDates.length; index += 1) {
+    intervals.push(
+      Math.round((sortedDates[index] - sortedDates[index - 1]) / 86400000)
+    );
+  }
+
+  const averageInterval =
+    intervals.reduce((sum, interval) => sum + interval, 0) / intervals.length;
+
+  if (averageInterval >= 26 && averageInterval <= 35) {
+    return "monthly";
+  }
+
+  if (averageInterval >= 12 && averageInterval <= 16) {
+    return "biweekly";
+  }
+
+  if (averageInterval >= 5 && averageInterval <= 9) {
+    return "weekly";
+  }
+
+  return null;
 }
 
 function addMonths(date: Date, months: number) {
@@ -563,15 +825,18 @@ const DEFAULT_PAYCHECK_SETTINGS: PaycheckSettings = {
   secondTwiceMonthlyDay: "15",
 };
 
-const MOBILE_TABS: Array<{ id: MobileTab; label: string; icon: string }> = [
-  { id: "home", label: "Home", icon: "⌂" },
-  { id: "budget", label: "Budget", icon: "$" },
-  { id: "spending", label: "Spending", icon: "+" },
-  { id: "bills", label: "Bills", icon: "◷" },
-  { id: "plan", label: "Plan", icon: "◎" },
+const MOBILE_TABS: Array<{ id: MobileTab; label: string; icon: IconName }> = [
+  { id: "home", label: "Home", icon: "home" },
+  { id: "budget", label: "Budget", icon: "budget" },
+  { id: "spending", label: "Spending", icon: "spending" },
+  { id: "bills", label: "Bills", icon: "bills" },
+  { id: "plan", label: "Plan", icon: "plan" },
 ];
 
 const OVESPENDING_KEYWORDS = [
+  "food",
+  "grocery",
+  "groceries",
   "dining",
   "eating",
   "restaurant",
@@ -634,6 +899,7 @@ export default function Home() {
   const [debtStrategy, setDebtStrategy] = useState<DebtStrategy>("snowball");
   const [extraDebtPayment, setExtraDebtPayment] = useState("0");
   const [monthlyIncomeInput, setMonthlyIncomeInput] = useState(String(DEFAULT_MONTHLY_INCOME));
+  const [monthlyBudgetSyncReady, setMonthlyBudgetSyncReady] = useState(false);
   const [assignedBudget, setAssignedBudget] = useState<Record<string, number>>({});
   const [assignmentSyncReady, setAssignmentSyncReady] = useState(false);
   const [paycheckSettings, setPaycheckSettings] = useState<PaycheckSettings>(
@@ -646,11 +912,32 @@ export default function Home() {
   const [netWorthDebtsInput, setNetWorthDebtsInput] = useState("");
   const [savingsGoalInput, setSavingsGoalInput] = useState("");
   const [savingsAdjustmentInput, setSavingsAdjustmentInput] = useState("");
+  const [toast, setToast] = useState<{
+    message: string;
+    tone: "success" | "warning" | "info";
+  } | null>(null);
 
   function syncSavingsState(nextSavings: Savings | null) {
     setSavings(nextSavings);
     setSavingsGoalInput(String(Number(nextSavings?.goal || 1000)));
   }
+
+  function pushToast(
+    message: string,
+    tone: "success" | "warning" | "info" = "success"
+  ) {
+    setToast({ message, tone });
+  }
+
+  useEffect(() => {
+    if (!toast) return;
+
+    const timeout = window.setTimeout(() => {
+      setToast(null);
+    }, 2800);
+
+    return () => window.clearTimeout(timeout);
+  }, [toast]);
 
   const signOut = async () => {
     const { error } = await supabase.auth.signOut();
@@ -766,25 +1053,50 @@ export default function Home() {
     }
 
     setSyncError(null);
+    pushToast("Paycheck settings saved.");
   };
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const storedIncome = window.localStorage.getItem("money-os:income");
+  const saveMonthlyBudgetState = async (incomeValue: string, uid: string) => {
+    const monthKey = getCurrentMonthKey();
+    const { error } = await supabase.from("monthly_budget_state").upsert(
+      {
+        user_id: uid,
+        month_key: monthKey,
+        monthly_income: Number(incomeValue || 0),
+      },
+      { onConflict: "user_id,month_key" }
+    );
 
-    if (storedIncome) {
-      const frame = window.requestAnimationFrame(() => {
-        setMonthlyIncomeInput(storedIncome);
+    if (error) {
+      logSupabaseError("Failed to save monthly budget state", error, {
+        userId: uid,
+        monthKey,
+        monthlyIncome: Number(incomeValue || 0),
       });
-
-      return () => window.cancelAnimationFrame(frame);
+      setSyncError(getErrorMessage(error));
+      return false;
     }
-  }, []);
+
+    setSyncError(null);
+    return true;
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem("money-os:income", monthlyIncomeInput || "0");
   }, [monthlyIncomeInput]);
+
+  useEffect(() => {
+    if (!monthlyBudgetSyncReady || !userId) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void saveMonthlyBudgetState(monthlyIncomeInput, userId);
+    }, 350);
+
+    return () => window.clearTimeout(timeout);
+  }, [monthlyBudgetSyncReady, monthlyIncomeInput, userId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -841,7 +1153,7 @@ export default function Home() {
       setUserId(uid);
 
       const monthKey = getCurrentMonthKey();
-      const [txRes, accountRes, categoryRes, debtRes, billRes, netWorthRes, assignmentRes, paycheckRes] =
+      const [txRes, accountRes, categoryRes, debtRes, billRes, netWorthRes, assignmentRes, paycheckRes, monthlyBudgetRes] =
         await Promise.all([
           supabase
             .from("transactions")
@@ -879,6 +1191,13 @@ export default function Home() {
             .select("schedule_type, anchor_date, monthly_day, first_twice_monthly_day, second_twice_monthly_day")
             .eq("user_id", uid)
             .maybeSingle(),
+
+          supabase
+            .from("monthly_budget_state")
+            .select("month_key, monthly_income")
+            .eq("user_id", uid)
+            .eq("month_key", monthKey)
+            .maybeSingle(),
         ]);
 
       const loadErrors = [
@@ -890,6 +1209,7 @@ export default function Home() {
         netWorthRes.error,
         assignmentRes.error,
         paycheckRes.error,
+        monthlyBudgetRes.error,
       ].filter(Boolean);
 
       if (loadErrors.length > 0) {
@@ -941,6 +1261,24 @@ export default function Home() {
       }
 
       setAssignmentSyncReady(true);
+
+      if (monthlyBudgetRes.data) {
+        const monthlyBudgetRow = monthlyBudgetRes.data as MonthlyBudgetStateRow;
+        setMonthlyIncomeInput(
+          String(
+            Number(monthlyBudgetRow.monthly_income ?? DEFAULT_MONTHLY_INCOME)
+          )
+        );
+      } else if (typeof window !== "undefined") {
+        const storedIncome = window.localStorage.getItem("money-os:income");
+
+        if (storedIncome) {
+          setMonthlyIncomeInput(storedIncome);
+          await saveMonthlyBudgetState(storedIncome, uid);
+        }
+      }
+
+      setMonthlyBudgetSyncReady(true);
 
       if (paycheckRes.data) {
         setPaycheckSettings(
@@ -1155,6 +1493,11 @@ export default function Home() {
 
     if (data) setTransactions([data, ...transactions]);
     setSyncError(null);
+    pushToast(
+      transactionType === "income"
+        ? "Income saved."
+        : "Transaction saved."
+    );
     setAmount("");
     setTransactionMerchant("");
     setTransactionMemo("");
@@ -1215,6 +1558,7 @@ export default function Home() {
 
     setSyncError(null);
     setBankBalanceInput("");
+    pushToast("Bank balance updated.");
   };
 
   const updateSavings = async (newAmount: number) => {
@@ -1238,6 +1582,7 @@ export default function Home() {
 
     if (data) syncSavingsState(data);
     setSyncError(null);
+    pushToast("Emergency fund updated.");
   };
 
   const updateSavingsGoal = async (newGoal: number) => {
@@ -1323,6 +1668,7 @@ export default function Home() {
     setNetWorthAssetsInput("");
     setNetWorthDebtsInput("");
     setSyncError(null);
+    pushToast("Net worth snapshot saved.");
   };
 
   const addDebt = async () => {
@@ -1379,6 +1725,7 @@ export default function Home() {
     setNewDebtInterest("");
     setNewDebtMinPayment("");
     setSyncError(null);
+    pushToast("Debt saved.");
   };
 
   const loadDebtPreset = async () => {
@@ -1420,6 +1767,7 @@ export default function Home() {
     }
 
     setSyncError(null);
+    pushToast("Debt preset loaded.");
   };
 
   const updateDebtField = (
@@ -1479,6 +1827,7 @@ export default function Home() {
     }
 
     setSyncError(null);
+    pushToast("Debt updated.");
   };
 
   const deleteDebt = async (debtId: string) => {
@@ -1498,6 +1847,7 @@ export default function Home() {
       return nextDebts;
     });
     setSyncError(null);
+    pushToast("Debt deleted.", "info");
   };
 
   const updateBillField = (
@@ -1555,6 +1905,7 @@ export default function Home() {
     }
 
     setSyncError(null);
+    pushToast("Recurring bill saved.");
   };
 
   const addRecurringBill = async () => {
@@ -1611,6 +1962,7 @@ export default function Home() {
     setNewBillDueDay("");
     setNewBillSplitAcrossPaychecks(false);
     setSyncError(null);
+    pushToast("Recurring bill added.");
   };
 
   const updateCategoryField = (
@@ -1672,6 +2024,7 @@ export default function Home() {
     }
 
     setSyncError(null);
+    pushToast("Category saved.");
   };
 
   const updateBudgetItemTarget = (itemKey: string, value: string) => {
@@ -1820,6 +2173,7 @@ export default function Home() {
     setCategoryFormMessage(`Saved ${data?.name || "category"}.`);
     setCategorySubmitting(false);
     setSyncError(null);
+    pushToast("Budget category added.");
   };
 
   const now = new Date();
@@ -1975,6 +2329,56 @@ export default function Home() {
     )
     .sort((a, b) => b.riskScore - a.riskScore)
     .slice(0, 5);
+
+  const merchantHistory = useMemo(() => {
+    const history = new Map<
+      string,
+      {
+        categoryCounts: Record<string, number>;
+        lastAccountId: string | null;
+        transactions: Transaction[];
+      }
+    >();
+
+    transactions.forEach((transaction) => {
+      const normalizedMerchant = normalizeMerchantName(transaction.merchant);
+      if (!normalizedMerchant) return;
+
+      const current = history.get(normalizedMerchant) || {
+        categoryCounts: {},
+        lastAccountId: null,
+        transactions: [],
+      };
+
+      current.transactions.push(transaction);
+      current.lastAccountId = transaction.account_id || current.lastAccountId;
+      current.categoryCounts[transaction.category] =
+        (current.categoryCounts[transaction.category] || 0) + 1;
+
+      history.set(normalizedMerchant, current);
+    });
+
+    return history;
+  }, [transactions]);
+
+  const merchantSuggestion = useMemo(() => {
+    const normalizedMerchant = normalizeMerchantName(transactionMerchant);
+    if (!normalizedMerchant) return null;
+
+    const history = merchantHistory.get(normalizedMerchant);
+    if (!history) return null;
+
+    const topCategory =
+      Object.entries(history.categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+      null;
+
+    return {
+      category: topCategory,
+      accountId: history.lastAccountId,
+      cadence: detectRecurringCadence(history.transactions),
+      count: history.transactions.length,
+    };
+  }, [merchantHistory, transactionMerchant]);
 
   const lastSevenDays = Array.from({ length: 7 }, (_, index) => {
     const day = startOfDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() - (6 - index)));
@@ -2308,8 +2712,8 @@ export default function Home() {
   const mobileSectionClass = (tabs: MobileTab | MobileTab[]) => {
     const allowedTabs = Array.isArray(tabs) ? tabs : [tabs];
     return allowedTabs.includes(activeMobileTab)
-      ? "block translate-y-0 opacity-100 transition-all duration-200 lg:block"
-      : "hidden lg:block";
+      ? "block translate-y-0 opacity-100 transition-all duration-200"
+      : "hidden";
   };
   const selectMobileTab = (tab: MobileTab) => {
     setActiveMobileTab(tab);
@@ -2340,6 +2744,50 @@ export default function Home() {
   const canAfford =
     Number(planned || 0) <= safeToSpend &&
     Number(planned || 0) <= availableCash;
+  const enteredTransactionAmount = Math.abs(Number(amount || 0));
+  const selectedCategoryRow = categoryRows.find(
+    (category) => category.name === selectedCategory
+  );
+  const weeklyPaceBreaks =
+    transactionType === "expense" &&
+    enteredTransactionAmount > 0 &&
+    Boolean(
+      (selectedCategoryRow &&
+        enteredTransactionAmount > Math.max(selectedCategoryRow.weeklyRemaining, 0)) ||
+        enteredTransactionAmount > safeThisWeek
+    );
+  const transactionPaceWarning =
+    transactionType !== "expense" || enteredTransactionAmount <= 0
+      ? null
+      : selectedCategoryRow &&
+          enteredTransactionAmount > Math.max(selectedCategoryRow.weeklyRemaining, 0)
+        ? `${selectedCategory} only has ${formatCurrency(
+            Math.max(selectedCategoryRow.weeklyRemaining, 0)
+          )} left in this week's pace.`
+        : enteredTransactionAmount > safeThisWeek
+          ? `This expense is above your current safe-this-week room of ${formatCurrency(
+              safeThisWeek
+            )}.`
+          : null;
+
+  const handleTransactionMerchantChange = (value: string) => {
+    setTransactionMerchant(value);
+
+    const history = merchantHistory.get(normalizeMerchantName(value));
+    if (!history) return;
+
+    const topCategory =
+      Object.entries(history.categoryCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+      null;
+
+    if (topCategory) {
+      setSelectedCategory(topCategory);
+    }
+
+    if (history.lastAccountId) {
+      setTransactionAccountId(history.lastAccountId);
+    }
+  };
 
   const fundItem = (itemKey: string, amount: number) => {
     if (amount <= 0) return;
@@ -2373,10 +2821,12 @@ export default function Home() {
     });
 
     void commitAssignedBudget(nextAssignments);
+    pushToast("Ready cash assigned.");
   };
 
   const resetAssignments = () => {
     void commitAssignedBudget({});
+    pushToast("Assignments reset.", "info");
   };
 
   const payoffPlan = useMemo(() => {
@@ -2398,6 +2848,26 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(34,211,238,0.16),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(244,114,182,0.10),_transparent_24%),linear-gradient(180deg,_#08101f_0%,_#0b1324_46%,_#09101d_100%)] px-4 py-4 pb-28 text-white sm:px-6 lg:px-8 lg:py-8 lg:pb-8">
+      {toast ? (
+        <div className="pointer-events-none fixed inset-x-4 top-4 z-50 flex justify-end">
+          <div
+            className={
+              toast.tone === "success"
+                ? "flex max-w-sm items-center gap-3 rounded-2xl border border-emerald-400/40 bg-emerald-500/12 px-4 py-3 text-sm text-emerald-100 shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
+                : toast.tone === "warning"
+                  ? "flex max-w-sm items-center gap-3 rounded-2xl border border-amber-400/40 bg-amber-500/12 px-4 py-3 text-sm text-amber-100 shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
+                  : "flex max-w-sm items-center gap-3 rounded-2xl border border-cyan-400/40 bg-cyan-500/12 px-4 py-3 text-sm text-cyan-100 shadow-[0_16px_40px_rgba(0,0,0,0.35)] backdrop-blur"
+            }
+          >
+            <AppIcon
+              name={toast.tone === "success" ? "success" : toast.tone === "warning" ? "warning" : "info"}
+              className="h-5 w-5 shrink-0"
+            />
+            <span>{toast.message}</span>
+          </div>
+        </div>
+      ) : null}
+
       <div className="mx-auto max-w-7xl space-y-5 lg:space-y-6">
         <section className="overflow-hidden rounded-[2rem] border border-cyan-400/25 bg-[#10192c]/90 p-5 shadow-[0_20px_80px_rgba(0,0,0,0.45)] backdrop-blur xl:p-7">
           <div className="flex items-start justify-between gap-4">
@@ -2433,53 +2903,30 @@ export default function Home() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-2">
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Safe Today</p>
-                <p className="mt-3 text-3xl text-slate-50">{formatCurrency(dailySafeToSpend)}</p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Safe This Week</p>
-                <p className={safeThisWeek <= 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}>
-                  {formatCurrency(safeThisWeek)}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Bank Balance</p>
-                <p className="mt-3 text-3xl text-slate-50">{formatCurrency(currentBankBalance)}</p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Available Cash</p>
-                <p className={availableCash < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}>
-                  {formatCurrency(availableCash)}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Next Payday</p>
-                <p className="mt-3 text-2xl text-slate-50">
-                  {nextPayday ? formatMonthYear(nextPayday) : "Set schedule"}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Ready To Assign</p>
-                <p className={readyToAssign < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-emerald-400"}>
-                  {formatCurrency(readyToAssign)}
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Safe By Friday</p>
-                <p className="mt-3 text-3xl text-slate-50">{formatCurrency(fridayNumberAfterPlanned)}</p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-500">Underfunded</p>
-                <p className="mt-3 text-3xl text-slate-50">{formatCurrency(underfundedTotal)}</p>
-              </div>
+              <MetricCard label="Safe Today" value={formatCurrency(dailySafeToSpend)} valueClassName="mt-3 text-3xl text-slate-50" />
+              <MetricCard
+                label="Safe This Week"
+                value={formatCurrency(safeThisWeek)}
+                valueClassName={safeThisWeek <= 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}
+              />
+              <MetricCard label="Bank Balance" value={formatCurrency(currentBankBalance)} valueClassName="mt-3 text-3xl text-slate-50" />
+              <MetricCard
+                label="Available Cash"
+                value={formatCurrency(availableCash)}
+                valueClassName={availableCash < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}
+              />
+              <MetricCard
+                label="Next Payday"
+                value={nextPayday ? formatMonthYear(nextPayday) : "Set schedule"}
+                valueClassName="mt-3 text-2xl text-slate-50"
+              />
+              <MetricCard
+                label="Ready To Assign"
+                value={formatCurrency(readyToAssign)}
+                valueClassName={readyToAssign < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-emerald-400"}
+              />
+              <MetricCard label="Safe By Friday" value={formatCurrency(fridayNumberAfterPlanned)} valueClassName="mt-3 text-3xl text-slate-50" />
+              <MetricCard label="Underfunded" value={formatCurrency(underfundedTotal)} valueClassName="mt-3 text-3xl text-slate-50" />
             </div>
           </div>
 
@@ -2496,28 +2943,22 @@ export default function Home() {
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Safe Today</p>
-                <p className="mt-2 text-2xl text-slate-50">{formatCurrency(dailySafeToSpend)}</p>
-              </div>
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Available Cash</p>
-                <p className={availableCash < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}>
-                  {formatCurrency(availableCash)}
-                </p>
-              </div>
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Next Payday</p>
-                <p className="mt-2 text-xl text-slate-50">
-                  {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "Set schedule"}
-                </p>
-              </div>
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Ready To Assign</p>
-                <p className={readyToAssign < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-emerald-400"}>
-                  {formatCurrency(readyToAssign)}
-                </p>
-              </div>
+              <MetricCard label="Safe Today" value={formatCurrency(dailySafeToSpend)} />
+              <MetricCard
+                label="Available Cash"
+                value={formatCurrency(availableCash)}
+                valueClassName={availableCash < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
+              />
+              <MetricCard
+                label="Next Payday"
+                value={nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "Set schedule"}
+                valueClassName="mt-2 text-xl text-slate-50"
+              />
+              <MetricCard
+                label="Ready To Assign"
+                value={formatCurrency(readyToAssign)}
+                valueClassName={readyToAssign < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-emerald-400"}
+              />
             </div>
 
             <div className="grid grid-cols-3 gap-2">
@@ -2542,16 +2983,12 @@ export default function Home() {
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">This Week</p>
-                <p className={safeThisWeek <= 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}>
-                  {formatCurrency(safeThisWeek)}
-                </p>
-              </div>
-              <div className="rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4">
-                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Underfunded</p>
-                <p className="mt-2 text-2xl text-slate-50">{formatCurrency(underfundedTotal)}</p>
-              </div>
+              <MetricCard
+                label="This Week"
+                value={formatCurrency(safeThisWeek)}
+                valueClassName={safeThisWeek <= 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
+              />
+              <MetricCard label="Underfunded" value={formatCurrency(underfundedTotal)} />
             </div>
           </div>
 
@@ -2584,7 +3021,7 @@ export default function Home() {
                       : "flex min-w-[96px] items-center justify-center gap-2 rounded-full border border-slate-700 bg-slate-950/50 px-4 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400 transition-all duration-200"
                   }
                 >
-                  <span className="text-sm leading-none">{tab.icon}</span>
+                  <AppIcon name={tab.icon} className="h-4 w-4 shrink-0" />
                   <span className="whitespace-nowrap leading-none">{tab.label}</span>
                 </button>
               ))}
@@ -2614,16 +3051,150 @@ export default function Home() {
           </div>
         </div>
 
+        <div className="lg:hidden">
+          <div className="sticky top-[4.9rem] z-20 rounded-2xl border border-cyan-400/20 bg-[#10192c]/92 px-4 py-3 shadow-[0_10px_30px_rgba(0,0,0,0.28)] backdrop-blur">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Safe Today</p>
+                <p className="mt-1 text-lg text-cyan-300">{formatCurrency(dailySafeToSpend)}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Ready To Assign</p>
+                <p className={readyToAssign < 0 ? "mt-1 text-lg text-red-400" : "mt-1 text-lg text-emerald-300"}>
+                  {formatCurrency(readyToAssign)}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {activeMobileTab === "home" ? (
+            <div className="-mx-4 mt-3 overflow-x-auto px-4 pb-1">
+              <div className="flex snap-x snap-mandatory gap-3">
+                <MetricCard
+                  className="min-w-[220px] snap-start"
+                  label="Available Cash"
+                  value={formatCurrency(availableCash)}
+                  valueClassName={availableCash < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
+                />
+                <MetricCard
+                  className="min-w-[220px] snap-start"
+                  label="Next Payday"
+                  value={nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "Set schedule"}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail={daysUntilNextPayday !== null ? `${daysUntilNextPayday} day${daysUntilNextPayday === 1 ? "" : "s"} away` : "No payday yet"}
+                />
+                <MetricCard
+                  className="min-w-[220px] snap-start"
+                  label="Reserved This Paycheck"
+                  value={formatCurrency(upcomingBillsBeforePaydayTotal)}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail={`${upcomingBillsBeforePayday.length} reserved item${upcomingBillsBeforePayday.length === 1 ? "" : "s"}`}
+                />
+                <MetricCard
+                  className="min-w-[220px] snap-start"
+                  label="Defense Alerts"
+                  value={String(overspendingDefense.filter((category) => category.alert !== "Watching").length)}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail="Categories running hot this week"
+                />
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="grid gap-5 lg:grid-cols-12">
+        <aside className="order-1 hidden self-start lg:sticky lg:top-6 lg:col-span-2 lg:block">
+          <div className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+            <p className="text-sm text-gray-400">Workspace</p>
+            <p className="mt-1 text-xs text-gray-500">
+              Pick the area you want to work in. The center updates to that workflow.
+            </p>
+
+            <div className="mt-4 space-y-2">
+              {MOBILE_TABS.map((tab) => (
+                <button
+                  key={`desktop-${tab.id}`}
+                  onClick={() => selectMobileTab(tab.id)}
+                  className={
+                    activeMobileTab === tab.id
+                      ? "flex w-full items-center gap-3 rounded-2xl border border-cyan-400 bg-cyan-400/12 px-4 py-3 text-left text-cyan-200"
+                      : "flex w-full items-center gap-3 rounded-2xl border border-slate-800 bg-black/20 px-4 py-3 text-left text-slate-400 transition hover:border-slate-700 hover:text-slate-200"
+                  }
+                >
+                  <AppIcon name={tab.icon} className="h-5 w-5 shrink-0" />
+                  <div>
+                    <p className="text-sm">{tab.label}</p>
+                    <p className="mt-1 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                      {tab.id === "home"
+                        ? "Overview"
+                        : tab.id === "budget"
+                          ? "Plan"
+                          : tab.id === "spending"
+                            ? "Track"
+                            : tab.id === "bills"
+                              ? "Cash Flow"
+                              : "Long Range"}
+                    </p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </aside>
+        <div className="order-2 min-w-0 lg:col-span-7">
         <div className="grid gap-5 lg:grid-cols-2 2xl:grid-cols-12">
-        <section className={`${mobileSectionClass("budget")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-5`}>
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm text-gray-400">Budget Planner</p>
+        <aside className="order-3 hidden self-start 2xl:sticky 2xl:top-6 2xl:col-span-3 2xl:block">
+          <div className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-gray-400">Desktop Summary</p>
+              <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-cyan-200">
+                Live
+              </span>
+            </div>
+
+            <div className="mt-4 grid gap-3">
+              <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Safe Today</p>
+                <p className="mt-2 text-3xl text-slate-50">{formatCurrency(dailySafeToSpend)}</p>
+              </div>
+              <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Available Cash</p>
+                <p className={availableCash < 0 ? "mt-2 text-3xl text-red-400" : "mt-2 text-3xl text-slate-50"}>
+                  {formatCurrency(availableCash)}
+                </p>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Payday</p>
+                  <p className="mt-2 text-base text-slate-50">
+                    {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "--"}
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
+                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Unassigned</p>
+                  <p className={readyToAssign < 0 ? "mt-2 text-base text-red-400" : "mt-2 text-base text-emerald-300"}>
+                    {formatCurrency(readyToAssign)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-black/30 p-4 text-sm text-slate-300">
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Why this matters</p>
+                <p className="mt-2 text-sm text-slate-400">{safeToSpendReason}</p>
+              </div>
+            </div>
+          </div>
+        </aside>
+        <DashboardPanel
+          className={`${mobileSectionClass("budget")} lg:col-span-2 2xl:col-span-5`}
+          title="Budget Planner"
+          right={
             <p className={readyToAssign < 0 ? "text-sm text-red-400" : "text-sm text-green-400"}>
               {readyToAssign < 0 ? "Over-assigned" : "Ready to assign"} {formatCurrency(Math.abs(readyToAssign))}
             </p>
-          </div>
-
-          <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
+          }
+        >
+          <div className="grid grid-cols-2 gap-3 text-sm">
             <div className="rounded-xl border border-gray-800 bg-black/40 p-3">
               <p className="text-gray-400">Monthly Income</p>
               <input
@@ -2664,21 +3235,21 @@ export default function Home() {
               Reset
             </button>
           </div>
-        </section>
+        </DashboardPanel>
 
-        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-7`}>
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm text-gray-400">Paycheck Calendar</p>
+        <DashboardPanel
+          className={`${mobileSectionClass("bills")} lg:col-span-2 2xl:col-span-7`}
+          title="Paycheck Calendar"
+          right={
             <p className={cashCoversUntilPayday ? "text-sm text-emerald-400" : "text-sm text-red-400"}>
               {cashCoversUntilPayday ? "Covered to payday" : "Short before payday"}
             </p>
-          </div>
-
-          <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+          }
+        >
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
             <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
               <div className="grid gap-3 sm:grid-cols-2">
-                <label className="text-sm text-gray-300">
-                  <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Pay schedule</span>
+                <FieldLabel label="Pay schedule" className="text-sm text-gray-300">
                   <select
                     value={paycheckSettings.type}
                     onChange={(e) =>
@@ -2694,12 +3265,11 @@ export default function Home() {
                     <option value="twice_monthly">Twice monthly</option>
                     <option value="monthly">Monthly</option>
                   </select>
-                </label>
+                </FieldLabel>
 
                 {(paycheckSettings.type === "weekly" ||
                   paycheckSettings.type === "biweekly") ? (
-                  <label className="text-sm text-gray-300">
-                    <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Known payday</span>
+                  <FieldLabel label="Known payday" className="text-sm text-gray-300">
                     <input
                       value={paycheckSettings.anchorDate}
                       onChange={(e) =>
@@ -2711,12 +3281,11 @@ export default function Home() {
                       type="date"
                       className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
                     />
-                  </label>
+                  </FieldLabel>
                 ) : null}
 
                 {paycheckSettings.type === "monthly" ? (
-                  <label className="text-sm text-gray-300">
-                    <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Day of month</span>
+                  <FieldLabel label="Day of month" className="text-sm text-gray-300">
                     <input
                       value={paycheckSettings.monthlyDay}
                       onChange={(e) =>
@@ -2730,13 +3299,12 @@ export default function Home() {
                       max="31"
                       className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
                     />
-                  </label>
+                  </FieldLabel>
                 ) : null}
 
                 {paycheckSettings.type === "twice_monthly" ? (
                   <>
-                    <label className="text-sm text-gray-300">
-                      <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">First payday</span>
+                    <FieldLabel label="First payday" className="text-sm text-gray-300">
                       <input
                         value={paycheckSettings.firstTwiceMonthlyDay}
                         onChange={(e) =>
@@ -2750,9 +3318,8 @@ export default function Home() {
                         max="31"
                         className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
                       />
-                    </label>
-                    <label className="text-sm text-gray-300">
-                      <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">Second payday</span>
+                    </FieldLabel>
+                    <FieldLabel label="Second payday" className="text-sm text-gray-300">
                       <input
                         value={paycheckSettings.secondTwiceMonthlyDay}
                         onChange={(e) =>
@@ -2766,17 +3333,17 @@ export default function Home() {
                         max="31"
                         className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
                       />
-                    </label>
+                    </FieldLabel>
                   </>
                 ) : null}
               </div>
 
-              <button
+              <ActionButton
                 onClick={() => void savePaycheckSettings()}
-                className="mt-3 w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+                className="mt-3 w-full"
               >
                 {paycheckSyncReady ? "Save Paycheck Settings" : "Loading Paycheck Settings"}
-              </button>
+              </ActionButton>
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2">
@@ -2808,15 +3375,14 @@ export default function Home() {
               </div>
             </div>
           </div>
-        </section>
+        </DashboardPanel>
 
-        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4`}>
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-400">Account Balance Trend</p>
-            <p className="text-xs text-gray-500">Estimated last 7 days</p>
-          </div>
-
-          <div className="mt-4 grid grid-cols-7 items-end gap-2">
+        <DashboardPanel
+          className={`${mobileSectionClass("bills")} lg:col-span-2 2xl:col-span-4`}
+          title="Account Balance Trend"
+          subtitle="Estimated last 7 days"
+        >
+          <div className="mt-1 grid grid-cols-7 items-end gap-2">
             {accountBalanceTrend.map((day) => (
               <div key={`balance-${day.label}`} className="flex flex-col items-center gap-2">
                 <div className="flex h-28 items-end">
@@ -2832,15 +3398,14 @@ export default function Home() {
               </div>
             ))}
           </div>
-        </section>
+        </DashboardPanel>
 
-        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4`}>
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-400">Cash vs Bills Due</p>
-            <p className="text-xs text-gray-500">Before next paycheck</p>
-          </div>
-
-          <div className="mt-3 space-y-3">
+        <DashboardPanel
+          className={`${mobileSectionClass("bills")} lg:col-span-2 2xl:col-span-4`}
+          title="Cash vs Bills Due"
+          subtitle="Before next paycheck"
+        >
+          <div className="space-y-3">
             {cashTimeline.length > 0 ? (
               cashTimeline.map((bill) => (
                 <div key={`timeline-${bill.key}`} className="rounded-xl border border-gray-800 bg-black/30 p-3">
@@ -2859,18 +3424,17 @@ export default function Home() {
                 </div>
               ))
             ) : (
-              <p className="text-sm text-gray-500">No cash-counting bills are due before your next paycheck.</p>
+              <EmptyState>No cash-counting bills are due before your next paycheck.</EmptyState>
             )}
           </div>
-        </section>
+        </DashboardPanel>
 
-        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-4`}>
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-400">Category Breakdown</p>
-            <p className="text-xs text-gray-500">Month to date</p>
-          </div>
-
-          <div className="mt-3 space-y-3">
+        <DashboardPanel
+          className={`${mobileSectionClass("spending")} lg:col-span-2 2xl:col-span-4`}
+          title="Category Breakdown"
+          subtitle="Month to date"
+        >
+          <div className="space-y-3">
             {categoryBreakdown.length > 0 ? (
               categoryBreakdown.map((category) => (
                 <div key={`breakdown-${category.id}`}>
@@ -2889,10 +3453,12 @@ export default function Home() {
                 </div>
               ))
             ) : (
-              <p className="text-sm text-gray-500">No category spending has been recorded this month yet.</p>
+              <EmptyState>
+                No category spending has been recorded this month yet. Add a few transactions to turn this into a real month-to-date view.
+              </EmptyState>
             )}
           </div>
-        </section>
+        </DashboardPanel>
 
         <section className={`${mobileSectionClass(["home", "spending"])} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-12`}>
           <div className="flex items-center justify-between">
@@ -2959,6 +3525,13 @@ export default function Home() {
                 </div>
 
                 <div className="mt-3 space-y-3">
+                  <div className="hidden grid-cols-[minmax(0,1fr)_112px_112px_104px_88px] gap-2 px-2 text-[11px] uppercase tracking-[0.16em] text-gray-500 lg:grid">
+                    <span>Category</span>
+                    <span>Target</span>
+                    <span>Assigned</span>
+                    <span>Target Action</span>
+                    <span>Fund</span>
+                  </div>
                   {group.items.map((item) => (
                     <div key={item.key} className="rounded-xl bg-[#0A0F1C] p-3">
                       {(() => {
@@ -3012,6 +3585,27 @@ export default function Home() {
                       </div>
 
                       <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+                        <FieldLabel label="Target" className="text-sm lg:hidden">
+                          <input
+                            value={String(item.target)}
+                            type="number"
+                            onChange={(e) => updateBudgetItemTarget(item.key, e.target.value)}
+                            readOnly={isManagedBill}
+                            className={
+                              isManagedBill
+                                ? "rounded-lg border border-gray-800 bg-slate-950/60 p-2 text-gray-500"
+                                : "rounded-lg border border-gray-700 bg-black p-2"
+                            }
+                          />
+                        </FieldLabel>
+                        <FieldLabel label="Assigned" className="text-sm lg:hidden">
+                          <input
+                            value={String(item.assigned)}
+                            onChange={(e) => updateAssignedBudget(item.key, e.target.value)}
+                            type="number"
+                            className="rounded-lg border border-gray-700 bg-black p-2"
+                          />
+                        </FieldLabel>
                         <input
                           value={String(item.target)}
                           type="number"
@@ -3019,37 +3613,39 @@ export default function Home() {
                           readOnly={isManagedBill}
                           className={
                             isManagedBill
-                              ? "rounded-lg border border-gray-800 bg-slate-950/60 p-2 text-gray-500"
-                              : "rounded-lg border border-gray-700 bg-black p-2"
+                              ? "hidden rounded-lg border border-gray-800 bg-slate-950/60 p-2 text-gray-500 lg:block"
+                              : "hidden rounded-lg border border-gray-700 bg-black p-2 lg:block"
                           }
                         />
                         <input
                           value={String(item.assigned)}
                           onChange={(e) => updateAssignedBudget(item.key, e.target.value)}
                           type="number"
-                          className="rounded-lg border border-gray-700 bg-black p-2"
+                          className="hidden rounded-lg border border-gray-700 bg-black p-2 lg:block"
                         />
                         {isManagedBill ? (
-                          <button
+                          <ActionButton
                             onClick={() => selectMobileTab("bills")}
-                            className="rounded-lg border border-slate-600 px-3 py-2 text-slate-300"
+                            tone="ghost"
+                            className="rounded-lg px-3"
                           >
                             Edit In Bills
-                          </button>
+                          </ActionButton>
                         ) : (
-                          <button
+                          <ActionButton
                             onClick={() => void saveBudgetItemTarget(item.key)}
-                            className="rounded-lg border border-slate-600 px-3 py-2 text-slate-300"
+                            tone="ghost"
+                            className="rounded-lg px-3"
                           >
                             Save Target
-                          </button>
+                          </ActionButton>
                         )}
-                        <button
+                        <ActionButton
                           onClick={() => fundItem(item.key, Math.min(item.needed, Math.max(readyToAssign, 0)))}
-                          className="rounded-lg border border-cyan-400 px-3 py-2 text-cyan-300"
+                          className="rounded-lg px-3"
                         >
                           Fund
-                        </button>
+                        </ActionButton>
                       </div>
                           </>
                         );
@@ -3071,12 +3667,12 @@ export default function Home() {
             type="number"
             className="w-full rounded-xl bg-black border border-gray-700 p-3"
           />
-          <button
+          <ActionButton
             onClick={updateMainBalance}
-            className="w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+            className="w-full"
           >
             Save Balance
-          </button>
+          </ActionButton>
         </section>
 
         <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
@@ -3127,10 +3723,24 @@ export default function Home() {
 
           <input
             value={transactionMerchant}
-            onChange={(e) => setTransactionMerchant(e.target.value)}
+            onChange={(e) => handleTransactionMerchantChange(e.target.value)}
             placeholder="Merchant or source"
             className="w-full rounded-xl bg-black border border-gray-700 p-3"
           />
+
+          {merchantSuggestion ? (
+            <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/8 px-4 py-3 text-xs text-cyan-100">
+              <p>
+                Auto-categorized to <span className="text-cyan-300">{merchantSuggestion.category || selectedCategory}</span>
+                {" "}from {merchantSuggestion.count} prior transaction{merchantSuggestion.count === 1 ? "" : "s"}.
+              </p>
+              {merchantSuggestion.cadence ? (
+                <p className="mt-1 text-cyan-200/80">
+                  Looks recurring on a {merchantSuggestion.cadence} cadence.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
 
           <textarea
             value={transactionMemo}
@@ -3168,12 +3778,27 @@ export default function Home() {
             className="w-full rounded-xl bg-black border border-gray-700 p-3"
           />
 
-          <button
+          <ActionButton
             onClick={addTransaction}
-            className="w-full rounded-xl bg-cyan-400 py-2 font-bold text-black"
+            tone="primary"
+            className="w-full font-bold"
           >
             Add Transaction
-          </button>
+          </ActionButton>
+
+          {transactionPaceWarning ? (
+            <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+              <div className="flex items-start gap-3">
+                <AppIcon name="warning" className="mt-0.5 h-4 w-4 shrink-0" />
+                <div>
+                  <p className="font-medium">
+                    {weeklyPaceBreaks ? "This spending breaks your current weekly pace." : "Spending warning"}
+                  </p>
+                  <p className="mt-1 text-amber-100/80">{transactionPaceWarning}</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </section>
 
         <section className={`${mobileSectionClass("budget")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
@@ -3288,17 +3913,17 @@ export default function Home() {
             ) : null}
           </div>
 
-          <button
+          <ActionButton
             onClick={addCategory}
             disabled={!canSubmitCategory}
             className={
               canSubmitCategory
-                ? "w-full rounded-xl border border-cyan-400 py-3 text-cyan-300"
-                : "w-full rounded-xl border border-gray-700 py-3 text-gray-500"
+                ? "w-full py-3"
+                : "w-full border-gray-700 py-3 text-gray-500"
             }
           >
             {categorySubmitting ? "Saving Category..." : "Save Category"}
-          </button>
+          </ActionButton>
         </section>
 
         <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] lg:col-span-2 2xl:col-span-6`}>
@@ -3358,30 +3983,38 @@ export default function Home() {
             {bills.map((bill) => (
               <div key={bill.id} className="rounded-xl bg-black/40 p-3">
                 <div className="grid grid-cols-2 gap-2">
-                  <input
-                    value={bill.name}
-                    onChange={(e) => updateBillField(bill.id, "name", e.target.value)}
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(bill.amount)}
-                    onChange={(e) => updateBillField(bill.id, "amount", e.target.value)}
-                    type="number"
-                    placeholder="Amount"
-                    className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(bill.due_day)}
-                    onChange={(e) => updateBillField(bill.id, "due_day", e.target.value)}
-                    type="number"
-                    placeholder="Due day"
-                    className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={bill.category}
-                    onChange={(e) => updateBillField(bill.id, "category", e.target.value)}
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
+                  <FieldLabel label="Bill Name" className="col-span-2">
+                    <input
+                      value={bill.name}
+                      onChange={(e) => updateBillField(bill.id, "name", e.target.value)}
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Amount">
+                    <input
+                      value={String(bill.amount)}
+                      onChange={(e) => updateBillField(bill.id, "amount", e.target.value)}
+                      type="number"
+                      placeholder="Amount"
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Due Day">
+                    <input
+                      value={String(bill.due_day)}
+                      onChange={(e) => updateBillField(bill.id, "due_day", e.target.value)}
+                      type="number"
+                      placeholder="Due day"
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Budget Category" className="col-span-2">
+                    <input
+                      value={bill.category}
+                      onChange={(e) => updateBillField(bill.id, "category", e.target.value)}
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
                   <label className="col-span-2 flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
                     <span>Counts toward Available Cash</span>
                     <input
@@ -3413,12 +4046,12 @@ export default function Home() {
                     />
                   </label>
                 </div>
-                <button
+                <ActionButton
                   onClick={() => saveBill(bill)}
-                  className="mt-3 w-full rounded-lg border border-cyan-400 py-2 text-cyan-300"
+                  className="mt-3 w-full rounded-lg"
                 >
                   Save Bill
-                </button>
+                </ActionButton>
               </div>
             ))}
           </div>
@@ -3430,39 +4063,49 @@ export default function Home() {
             {categories.map((category) => (
               <div key={category.id} className="rounded-xl bg-black/40 p-3">
                 <div className="grid grid-cols-2 gap-2">
-                  <input
-                    value={category.name}
-                    onChange={(e) => updateCategoryField(category.id, "name", e.target.value)}
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={category.group_name}
-                    onChange={(e) => updateCategoryField(category.id, "group_name", e.target.value)}
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(category.weekly_limit)}
-                    onChange={(e) => updateCategoryField(category.id, "weekly_limit", e.target.value)}
-                    type="number"
-                    placeholder="Weekly limit"
-                    className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={String(category.monthly_limit)}
-                    onChange={(e) => updateCategoryField(category.id, "monthly_limit", e.target.value)}
-                    type="number"
-                    placeholder="Monthly limit"
-                    className="rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
-                  <input
-                    value={category.target_day ? String(category.target_day) : ""}
-                    onChange={(e) => updateCategoryField(category.id, "target_day", e.target.value)}
-                    type="number"
-                    min="1"
-                    max="31"
-                    placeholder="Target day"
-                    className="col-span-2 rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
-                  />
+                  <FieldLabel label="Category Name" className="col-span-2">
+                    <input
+                      value={category.name}
+                      onChange={(e) => updateCategoryField(category.id, "name", e.target.value)}
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Group Name" className="col-span-2">
+                    <input
+                      value={category.group_name}
+                      onChange={(e) => updateCategoryField(category.id, "group_name", e.target.value)}
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Weekly Limit">
+                    <input
+                      value={String(category.weekly_limit)}
+                      onChange={(e) => updateCategoryField(category.id, "weekly_limit", e.target.value)}
+                      type="number"
+                      placeholder="Weekly limit"
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Monthly Limit">
+                    <input
+                      value={String(category.monthly_limit)}
+                      onChange={(e) => updateCategoryField(category.id, "monthly_limit", e.target.value)}
+                      type="number"
+                      placeholder="Monthly limit"
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
+                  <FieldLabel label="Target Day" className="col-span-2">
+                    <input
+                      value={category.target_day ? String(category.target_day) : ""}
+                      onChange={(e) => updateCategoryField(category.id, "target_day", e.target.value)}
+                      type="number"
+                      min="1"
+                      max="31"
+                      placeholder="Target day"
+                      className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                    />
+                  </FieldLabel>
                   <label className="col-span-2 flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
                     <span>Split Across Paychecks</span>
                     <input
@@ -3479,12 +4122,12 @@ export default function Home() {
                     />
                   </label>
                 </div>
-                <button
+                <ActionButton
                   onClick={() => saveCategory(category)}
-                  className="mt-3 w-full rounded-lg border border-cyan-400 py-2 text-cyan-300"
+                  className="mt-3 w-full rounded-lg"
                 >
                   Save Category Budget
-                </button>
+                </ActionButton>
               </div>
             ))}
           </div>
@@ -3607,9 +4250,9 @@ export default function Home() {
                 </div>
               ))
             ) : (
-              <p className="text-sm text-gray-500">
+              <EmptyState tone="warning">
                 No risky categories detected yet. Add categories like Dining Out, Shopping, or Entertainment to start tracking them.
-              </p>
+              </EmptyState>
             )}
           </div>
         </section>
@@ -3654,12 +4297,12 @@ export default function Home() {
                 type="number"
                 className="w-full rounded-xl bg-black border border-gray-700 p-3"
               />
-              <button
+              <ActionButton
                 onClick={() => void updateSavingsGoal(Math.max(Number(savingsGoalInput || 0), 0))}
-                className="rounded-xl border border-cyan-400 px-4 py-2 text-cyan-300"
+                className="shrink-0"
               >
                 Save
-              </button>
+              </ActionButton>
             </div>
           </label>
 
@@ -3677,18 +4320,19 @@ export default function Home() {
           </label>
 
           <div className="mt-3 flex gap-2">
-            <button
+            <ActionButton
               onClick={() => void applySavingsAdjustment()}
-              className="flex-1 rounded-xl border border-green-400 py-2 text-green-300"
+              tone="secondary"
+              className="flex-1 border-green-400 py-2 text-green-300"
             >
               Apply Change
-            </button>
-            <button
+            </ActionButton>
+            <ActionButton
               onClick={() => void resetSavingsBalance()}
-              className="rounded-xl border border-red-500/50 px-4 py-2 text-red-300"
+              tone="danger"
             >
               Reset
-            </button>
+            </ActionButton>
           </div>
         </section>
 
@@ -3821,12 +4465,12 @@ export default function Home() {
               </label>
             </div>
 
-            <button
+            <ActionButton
               onClick={addDebt}
-              className="w-full rounded-xl border border-cyan-400 py-2 text-cyan-300"
+              className="w-full"
             >
               Save Debt
-            </button>
+            </ActionButton>
           </div>
 
           {payoffPlan.payoffOrder.length > 0 ? (
@@ -3926,18 +4570,19 @@ export default function Home() {
                     </p>
 
                     <div className="mt-3 flex gap-2">
-                      <button
+                      <ActionButton
                         onClick={() => saveDebt(debt)}
-                        className="flex-1 rounded-lg border border-cyan-400 py-2 text-cyan-300"
+                        className="flex-1 rounded-lg"
                       >
                         Save
-                      </button>
-                      <button
+                      </ActionButton>
+                      <ActionButton
                         onClick={() => deleteDebt(debt.id)}
-                        className="rounded-lg border border-red-500/50 px-3 py-2 text-red-300"
+                        tone="danger"
+                        className="rounded-lg px-3"
                       >
                         Delete
-                      </button>
+                      </ActionButton>
                     </div>
                   </>
                 ) : null}
@@ -3946,8 +4591,10 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`${mobileSectionClass("plan")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
-          <p className="text-sm text-gray-400">Net Worth Snapshot</p>
+        <DashboardPanel
+          className={`${mobileSectionClass("plan")} 2xl:col-span-3`}
+          title="Net Worth Snapshot"
+        >
           {netWorth ? (
             <>
               <p className="text-2xl">${Number(netWorth.net_worth).toFixed(2)}</p>
@@ -4031,10 +4678,12 @@ export default function Home() {
               <p className="mt-2 text-sm text-gray-500">No trend yet.</p>
             )}
           </div>
-        </section>
+        </DashboardPanel>
 
-        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
-          <p className="text-sm text-gray-400 mb-2">Recent Transactions</p>
+        <DashboardPanel
+          className={`${mobileSectionClass("spending")} 2xl:col-span-3`}
+          title="Recent Transactions"
+        >
 
           <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
             <div className="flex items-end justify-between">
@@ -4060,6 +4709,27 @@ export default function Home() {
                   <p className="text-slate-50">
                     {tx.merchant?.trim() || tx.category}
                   </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    {(() => {
+                      const cadence = tx.merchant
+                        ? detectRecurringCadence(
+                            merchantHistory.get(normalizeMerchantName(tx.merchant))
+                              ?.transactions || []
+                          )
+                        : null;
+
+                      return cadence ? (
+                        <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-cyan-200">
+                          {cadence}
+                        </span>
+                      ) : null;
+                    })()}
+                    {tx.merchant ? (
+                      <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                        remembered
+                      </span>
+                    ) : null}
+                  </div>
                   <p className="text-xs text-slate-400">
                     {tx.category}
                     {tx.account_id
@@ -4089,26 +4759,30 @@ export default function Home() {
               </div>
             ))}
             {transactions.length === 0 ? (
-              <p className="text-sm text-gray-500">No transactions yet.</p>
+              <EmptyState className="px-4 py-5">
+                No transactions yet. Add your first expense or income entry to start building trends, category history, and spending pace.
+              </EmptyState>
             ) : null}
           </div>
-        </section>
+        </DashboardPanel>
+        </div>
+        </div>
         </div>
       </div>
 
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-slate-700/80 bg-[#09101d]/95 px-3 py-3 backdrop-blur lg:hidden">
         <div className="mx-auto grid max-w-7xl grid-cols-5 gap-2">
-          {MOBILE_TABS.map((tab) => (
-            <button
-              key={`bottom-${tab.id}`}
-              onClick={() => selectMobileTab(tab.id)}
+              {MOBILE_TABS.map((tab) => (
+                <button
+                  key={`bottom-${tab.id}`}
+                  onClick={() => selectMobileTab(tab.id)}
               className={
                 activeMobileTab === tab.id
                   ? "flex flex-col items-center justify-center gap-1 rounded-2xl border border-cyan-400 bg-cyan-400/15 px-2 py-2 text-[10px] font-medium uppercase tracking-[0.1em] text-cyan-300 shadow-[0_0_18px_rgba(34,211,238,0.16)] transition-all duration-200"
                   : "flex flex-col items-center justify-center gap-1 rounded-2xl border border-slate-800 bg-slate-950/40 px-2 py-2 text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500 transition-all duration-200"
               }
             >
-              <span className="text-sm leading-none">{tab.icon}</span>
+              <AppIcon name={tab.icon} className="h-4 w-4 shrink-0" />
               <span className="whitespace-nowrap text-center leading-none">{tab.label}</span>
             </button>
           ))}
