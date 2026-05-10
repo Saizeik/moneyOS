@@ -11,12 +11,12 @@ create table if not exists public.monthly_budget_state (
 create or replace function public.set_monthly_budget_state_updated_at()
 returns trigger
 language plpgsql
-as $$
+as $function$
 begin
   new.updated_at = timezone('utc', now());
   return new;
 end;
-$$;
+$function$;
 
 drop trigger if exists set_monthly_budget_state_updated_at on public.monthly_budget_state;
 

@@ -48,8 +48,10 @@ type DebtStrategy = "snowball" | "avalanche";
 
 type Savings = {
   id: string;
+  name: string;
   goal: number;
   current: number;
+  linked_category_id?: string | null;
 };
 
 type RecurringBill = {
@@ -99,7 +101,18 @@ type PaycheckSettings = {
   secondTwiceMonthlyDay: string;
 };
 
+type PaycheckHistoryRow = {
+  id: string;
+  received_date: string;
+  amount: number | null;
+  expected_date: string | null;
+  source_transaction_id: string | null;
+  note: string | null;
+  created_at: string;
+};
+
 type MobileTab = "home" | "budget" | "spending" | "bills" | "plan";
+type WorkspaceDensity = "comfortable" | "compact";
 type IconName =
   | "home"
   | "budget"
@@ -247,23 +260,29 @@ function AppIcon({
 }
 
 const dashboardPanelClass =
-  "rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]";
+  "rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 shadow-[0_12px_40px_rgba(0,0,0,0.22)]";
 
 function DashboardPanel({
   className = "",
   title,
   subtitle,
   right,
+  density = "comfortable",
   children,
 }: {
   className?: string;
   title: string;
   subtitle?: string;
   right?: ReactNode;
+  density?: WorkspaceDensity;
   children: ReactNode;
 }) {
   return (
-    <section className={`${dashboardPanelClass} ${className}`.trim()}>
+    <section
+      className={`${dashboardPanelClass} ${
+        density === "compact" ? "p-3 lg:p-3.5" : "p-4 lg:p-5"
+      } ${className}`.trim()}
+    >
       <div className="flex items-center justify-between gap-3">
         <div>
           <p className="text-sm text-gray-400">{title}</p>
@@ -307,22 +326,75 @@ function MetricCard({
   detail,
   valueClassName = "mt-2 text-2xl text-slate-50",
   className = "",
+  density = "comfortable",
 }: {
   label: string;
   value: ReactNode;
   detail?: ReactNode;
   valueClassName?: string;
   className?: string;
+  density?: WorkspaceDensity;
 }) {
   return (
     <div
-      className={`rounded-2xl border border-slate-700/80 bg-slate-950/35 p-4 ${className}`.trim()}
+      className={`rounded-2xl border border-slate-700/80 bg-slate-950/35 ${
+        density === "compact" ? "p-3" : "p-4"
+      } ${className}`.trim()}
     >
       <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
         {label}
       </p>
       <p className={valueClassName}>{value}</p>
       {detail ? <p className="mt-1 text-xs text-gray-500">{detail}</p> : null}
+    </div>
+  );
+}
+
+function BreakdownCard({
+  title,
+  rows,
+  className = "",
+  density = "comfortable",
+}: {
+  title: string;
+  rows: Array<{
+    label: string;
+    value: string;
+    tone?: "default" | "positive" | "negative";
+  }>;
+  className?: string;
+  density?: WorkspaceDensity;
+}) {
+  return (
+    <div
+      className={`rounded-2xl border border-slate-800 bg-black/25 ${
+        density === "compact" ? "p-3" : "p-4"
+      } ${className}`.trim()}
+    >
+      <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+        {title}
+      </p>
+      <div className="mt-3 space-y-2">
+        {rows.map((row) => (
+          <div
+            key={`${title}-${row.label}`}
+            className="flex items-center justify-between gap-3 text-sm"
+          >
+            <span className="text-slate-400">{row.label}</span>
+            <span
+              className={
+                row.tone === "positive"
+                  ? "text-emerald-300"
+                  : row.tone === "negative"
+                    ? "text-red-300"
+                    : "text-slate-100"
+              }
+            >
+              {row.value}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -502,7 +574,11 @@ function diffInDays(from: Date, to: Date) {
   return Math.max(Math.ceil((toStart - fromStart) / 86400000), 0);
 }
 
-function getNextPayday(settings: PaycheckSettings, now: Date) {
+function getNextPayday(
+  settings: PaycheckSettings,
+  now: Date,
+  strictlyFuture = false
+) {
   const today = startOfDay(now);
 
   if (settings.type === "weekly" || settings.type === "biweekly") {
@@ -512,7 +588,7 @@ function getNextPayday(settings: PaycheckSettings, now: Date) {
     const intervalDays = settings.type === "weekly" ? 7 : 14;
     const candidate = startOfDay(anchor);
 
-    while (candidate < today) {
+    while (strictlyFuture ? candidate <= today : candidate < today) {
       candidate.setDate(candidate.getDate() + intervalDays);
     }
 
@@ -527,7 +603,7 @@ function getNextPayday(settings: PaycheckSettings, now: Date) {
       monthlyDay
     );
 
-    if (currentMonthPayday >= today) {
+    if (strictlyFuture ? currentMonthPayday > today : currentMonthPayday >= today) {
       return currentMonthPayday;
     }
 
@@ -544,7 +620,11 @@ function getNextPayday(settings: PaycheckSettings, now: Date) {
     buildLocalDate(today.getFullYear(), today.getMonth() + 1, dayOptions[1]),
   ];
 
-  return candidates.find((candidate) => candidate >= today) || null;
+  return (
+    candidates.find((candidate) =>
+      strictlyFuture ? candidate > today : candidate >= today
+    ) || null
+  );
 }
 
 function getNextDueDate(dueDay: number, now: Date) {
@@ -566,13 +646,14 @@ function getPaydaysThroughDate(
   settings: PaycheckSettings,
   now: Date,
   endDate: Date,
-  maxOccurrences = 6
+  maxOccurrences = 6,
+  strictlyFuture = false
 ) {
   const paydays: Date[] = [];
   let cursor = startOfDay(now);
 
   for (let index = 0; index < maxOccurrences; index += 1) {
-    const nextPayday = getNextPayday(settings, cursor);
+    const nextPayday = getNextPayday(settings, cursor, strictlyFuture || index > 0);
 
     if (!nextPayday || nextPayday > endDate) {
       break;
@@ -594,12 +675,19 @@ function getCurrentPaycheckReserveAmount(
   settings: PaycheckSettings,
   now: Date,
   nextPayday: Date | null,
-  splitAcrossPaychecks: boolean
+  splitAcrossPaychecks: boolean,
+  strictlyFuture = false
 ) {
   if (!dueDate || amount <= 0) return 0;
 
   if (splitAcrossPaychecks) {
-    const paydaysRemaining = getPaydaysThroughDate(settings, now, dueDate).length;
+    const paydaysRemaining = getPaydaysThroughDate(
+      settings,
+      now,
+      dueDate,
+      6,
+      strictlyFuture
+    ).length;
     const paycheckSlicesRemaining = Math.max(paydaysRemaining, 1);
     return amount / paycheckSlicesRemaining;
   }
@@ -613,6 +701,29 @@ function getCurrentPaycheckReserveAmount(
 
 function getPaycheckStorageKey(userId: string | null) {
   return userId ? `money-os:paycheck-settings:${userId}` : "money-os:paycheck-settings";
+}
+
+function getWorkspaceDensityStorageKey(userId: string | null) {
+  return userId
+    ? `money-os:workspace-density:${userId}`
+    : "money-os:workspace-density";
+}
+
+function getEffectivePaycheckSettings(
+  settings: PaycheckSettings,
+  latestReceivedPaycheck: PaycheckHistoryRow | null
+) {
+  if (
+    !latestReceivedPaycheck ||
+    (settings.type !== "weekly" && settings.type !== "biweekly")
+  ) {
+    return settings;
+  }
+
+  return {
+    ...settings,
+    anchorDate: latestReceivedPaycheck.received_date,
+  };
 }
 
 function pickTargetDebtIndex(
@@ -861,10 +972,11 @@ export default function Home() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<BudgetCategory[]>([]);
   const [debts, setDebts] = useState<Debt[]>([]);
-  const [savings, setSavings] = useState<Savings | null>(null);
+  const [savingsGoals, setSavingsGoals] = useState<Savings[]>([]);
   const [bills, setBills] = useState<RecurringBill[]>([]);
   const [netWorth, setNetWorth] = useState<NetWorthSnapshot | null>(null);
   const [netWorthHistory, setNetWorthHistory] = useState<NetWorthSnapshot[]>([]);
+  const [paycheckHistory, setPaycheckHistory] = useState<PaycheckHistoryRow[]>([]);
 
   const [amount, setAmount] = useState("");
   const [transactionMerchant, setTransactionMerchant] = useState("");
@@ -876,6 +988,7 @@ export default function Home() {
   const [transactionType, setTransactionType] = useState<"income" | "expense">(
     "expense"
   );
+  const [transactionCountsAsPaycheck, setTransactionCountsAsPaycheck] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState("Groceries");
   const [planned, setPlanned] = useState("");
   const [bankBalanceInput, setBankBalanceInput] = useState("");
@@ -908,18 +1021,34 @@ export default function Home() {
   const [paycheckSyncReady, setPaycheckSyncReady] = useState(false);
   const [expandedDebts, setExpandedDebts] = useState<Record<string, boolean>>({});
   const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>("home");
+  const [workspaceDensity, setWorkspaceDensity] =
+    useState<WorkspaceDensity>("comfortable");
   const [netWorthAssetsInput, setNetWorthAssetsInput] = useState("");
   const [netWorthDebtsInput, setNetWorthDebtsInput] = useState("");
-  const [savingsGoalInput, setSavingsGoalInput] = useState("");
-  const [savingsAdjustmentInput, setSavingsAdjustmentInput] = useState("");
+  const [newSavingsGoalName, setNewSavingsGoalName] = useState("");
+  const [newSavingsGoalTarget, setNewSavingsGoalTarget] = useState("");
+  const [newSavingsGoalBudgetTarget, setNewSavingsGoalBudgetTarget] = useState("");
+  const [newSavingsGoalCreateBudgetRow, setNewSavingsGoalCreateBudgetRow] = useState(true);
+  const [savingsGoalEdits, setSavingsGoalEdits] = useState<Record<string, string>>({});
+  const [savingsAdjustmentInputs, setSavingsAdjustmentInputs] = useState<Record<string, string>>({});
   const [toast, setToast] = useState<{
     message: string;
     tone: "success" | "warning" | "info";
   } | null>(null);
+  const [manualPaycheckDateInput, setManualPaycheckDateInput] = useState(
+    formatInputDate(new Date())
+  );
+  const [manualPaycheckAmountInput, setManualPaycheckAmountInput] = useState("");
 
-  function syncSavingsState(nextSavings: Savings | null) {
-    setSavings(nextSavings);
-    setSavingsGoalInput(String(Number(nextSavings?.goal || 1000)));
+  function syncSavingsState(nextSavingsGoals: Savings[]) {
+    setSavingsGoals(nextSavingsGoals);
+    setSavingsGoalEdits((current) => {
+      const next: Record<string, string> = {};
+      nextSavingsGoals.forEach((goal) => {
+        next[goal.id] = current[goal.id] ?? String(Number(goal.goal || 0));
+      });
+      return next;
+    });
   }
 
   function pushToast(
@@ -1028,6 +1157,158 @@ export default function Home() {
       : DEFAULT_PAYCHECK_SETTINGS.secondTwiceMonthlyDay,
   });
 
+  const saveLinkedSavingsCategory = async ({
+    savingsGoalName,
+    linkedCategoryId = null,
+    initialMonthlyTarget,
+  }: {
+    savingsGoalName: string;
+    linkedCategoryId?: string | null;
+    initialMonthlyTarget?: number;
+  }) => {
+    if (!userId) return null;
+
+    const trimmedName = savingsGoalName.trim();
+    if (!trimmedName) return null;
+
+    if (linkedCategoryId) {
+      const { data, error } = await supabase
+        .from("budget_categories")
+        .update({
+          name: trimmedName,
+          group_name: "Savings",
+        })
+        .eq("id", linkedCategoryId)
+        .select()
+        .single();
+
+      if (error) {
+        logSupabaseError("Failed to update linked savings budget category", error, {
+          linkedCategoryId,
+          name: trimmedName,
+        });
+        setSyncError(getErrorMessage(error));
+        return null;
+      }
+
+      if (data) {
+        setCategories((current) =>
+          current.map((category) =>
+            category.id === linkedCategoryId ? (data as BudgetCategory) : category
+          )
+        );
+      }
+
+      return data as BudgetCategory | null;
+    }
+
+    const duplicate = categories.find(
+      (category) =>
+        category.group_name === "Savings" &&
+        category.name.trim().toLowerCase() === trimmedName.toLowerCase()
+    );
+
+    if (duplicate) {
+      return duplicate;
+    }
+
+    const nextPriority =
+      categories.reduce((max, category) => Math.max(max, Number(category.priority || 0)), 0) + 1;
+
+    const { data, error } = await supabase
+      .from("budget_categories")
+      .insert([
+        {
+          user_id: userId,
+          name: trimmedName,
+          group_name: "Savings",
+          weekly_limit: 0,
+          monthly_limit: Math.max(Number(initialMonthlyTarget || 0), 0),
+          target_day: null,
+          split_across_paychecks: false,
+          priority: nextPriority,
+          rollover: false,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to create linked savings budget category", error, {
+        userId,
+        name: trimmedName,
+        monthly_limit: Math.max(Number(initialMonthlyTarget || 0), 0),
+      });
+      setSyncError(getErrorMessage(error));
+      return null;
+    }
+
+    if (data) {
+      setCategories((current) => [...current, data as BudgetCategory]);
+    }
+
+    return data as BudgetCategory | null;
+  };
+
+  const recordPaycheckReceipt = async ({
+    receivedDate,
+    amount: receivedAmount,
+    expectedDate,
+    sourceTransactionId = null,
+    note = null,
+  }: {
+    receivedDate: string;
+    amount?: number | null;
+    expectedDate?: string | null;
+    sourceTransactionId?: string | null;
+    note?: string | null;
+  }) => {
+    if (!userId) return false;
+
+    if (
+      sourceTransactionId &&
+      paycheckHistory.some((entry) => entry.source_transaction_id === sourceTransactionId)
+    ) {
+      return true;
+    }
+
+    const payload = {
+      user_id: userId,
+      received_date: receivedDate,
+      amount:
+        receivedAmount !== undefined && receivedAmount !== null
+          ? Number(receivedAmount)
+          : null,
+      expected_date: expectedDate || null,
+      source_transaction_id: sourceTransactionId,
+      note,
+    };
+
+    const { data, error } = await supabase
+      .from("paycheck_history")
+      .insert(payload)
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to record paycheck receipt", error, payload);
+      setSyncError(getErrorMessage(error));
+      return false;
+    }
+
+    if (data) {
+      setPaycheckHistory((current) =>
+        [data as PaycheckHistoryRow, ...current].sort(
+          (a, b) =>
+            new Date(b.received_date).getTime() - new Date(a.received_date).getTime()
+        )
+      );
+    }
+
+    setSyncError(null);
+    return true;
+  };
+
   const savePaycheckSettings = async (settings = paycheckSettings) => {
     if (!userId) return;
 
@@ -1054,6 +1335,27 @@ export default function Home() {
 
     setSyncError(null);
     pushToast("Paycheck settings saved.");
+  };
+
+  const markPaycheckReceived = async () => {
+    const amountValue =
+      manualPaycheckAmountInput.trim().length > 0
+        ? Number(manualPaycheckAmountInput)
+        : null;
+
+    const success = await recordPaycheckReceipt({
+      receivedDate: manualPaycheckDateInput || formatInputDate(new Date()),
+      amount: amountValue,
+      expectedDate: nextPayday ? formatInputDate(nextPayday) : null,
+      note: "Manual paycheck check-in",
+    });
+
+    if (!success) {
+      return;
+    }
+
+    pushToast("Paycheck marked as received.");
+    setManualPaycheckAmountInput("");
   };
 
   const saveMonthlyBudgetState = async (incomeValue: string, uid: string) => {
@@ -1131,6 +1433,32 @@ export default function Home() {
   }, [paycheckSettings, userId]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    const storedDensity = window.localStorage.getItem(
+      getWorkspaceDensityStorageKey(userId)
+    );
+
+    if (
+      storedDensity === "compact" ||
+      storedDensity === "comfortable"
+    ) {
+      const frame = window.requestAnimationFrame(() => {
+        setWorkspaceDensity(storedDensity);
+      });
+
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(
+      getWorkspaceDensityStorageKey(userId),
+      workspaceDensity
+    );
+  }, [userId, workspaceDensity]);
+
+  useEffect(() => {
     const init = async () => {
       const {
         data: { user },
@@ -1153,7 +1481,7 @@ export default function Home() {
       setUserId(uid);
 
       const monthKey = getCurrentMonthKey();
-      const [txRes, accountRes, categoryRes, debtRes, billRes, netWorthRes, assignmentRes, paycheckRes, monthlyBudgetRes] =
+      const [txRes, accountRes, categoryRes, debtRes, billRes, netWorthRes, assignmentRes, paycheckRes, monthlyBudgetRes, paycheckHistoryRes] =
         await Promise.all([
           supabase
             .from("transactions")
@@ -1198,6 +1526,13 @@ export default function Home() {
             .eq("user_id", uid)
             .eq("month_key", monthKey)
             .maybeSingle(),
+
+          supabase
+            .from("paycheck_history")
+            .select("*")
+            .eq("user_id", uid)
+            .order("received_date", { ascending: false })
+            .limit(12),
         ]);
 
       const loadErrors = [
@@ -1210,6 +1545,7 @@ export default function Home() {
         assignmentRes.error,
         paycheckRes.error,
         monthlyBudgetRes.error,
+        paycheckHistoryRes.error,
       ].filter(Boolean);
 
       if (loadErrors.length > 0) {
@@ -1230,6 +1566,7 @@ export default function Home() {
       const snapshotHistory = netWorthRes.data || [];
       setNetWorthHistory(snapshotHistory);
       setNetWorth(snapshotHistory[0] || null);
+      setPaycheckHistory(paycheckHistoryRes.data || []);
 
       const remoteAssignments = Object.fromEntries(
         ((assignmentRes.data as BudgetAssignmentRow[] | null) || []).map((row) => [
@@ -1334,7 +1671,7 @@ export default function Home() {
         .from("savings")
         .select("*")
         .eq("user_id", uid)
-        .maybeSingle();
+        .order("created_at", { ascending: true });
 
       if (savingsError) {
         logSupabaseError("Failed to load savings", savingsError);
@@ -1343,12 +1680,12 @@ export default function Home() {
         return;
       }
 
-      if (!savingsData) {
+      if (!savingsData || savingsData.length === 0) {
         const { data: newSavings, error: newSavingsError } = await supabase
           .from("savings")
-          .insert([{ user_id: uid, goal: 1000, current: 0 }])
+          .insert([{ user_id: uid, name: "Emergency Fund", goal: 1000, current: 0, linked_category_id: null }])
           .select()
-          .single();
+          .order("created_at", { ascending: true });
 
         if (newSavingsError) {
           logSupabaseError("Failed to create savings row", newSavingsError, {
@@ -1357,9 +1694,9 @@ export default function Home() {
           setSyncError(getErrorMessage(newSavingsError));
         }
 
-        syncSavingsState(newSavings);
+        syncSavingsState((newSavings as Savings[] | null) || []);
       } else {
-        syncSavingsState(savingsData);
+        syncSavingsState((savingsData as Savings[]) || []);
       }
 
       setLoading(false);
@@ -1491,7 +1828,20 @@ export default function Home() {
       return;
     }
 
-    if (data) setTransactions([data, ...transactions]);
+    if (data) {
+      setTransactions([data, ...transactions]);
+    }
+
+    if (data && transactionType === "income" && transactionCountsAsPaycheck) {
+      await recordPaycheckReceipt({
+        receivedDate: transactionDateInput || formatInputDate(new Date()),
+        amount: normalizedAmount,
+        expectedDate: nextPayday ? formatInputDate(nextPayday) : null,
+        sourceTransactionId: data.id,
+        note: trimmedMerchant || "Income transaction",
+      });
+    }
+
     setSyncError(null);
     pushToast(
       transactionType === "income"
@@ -1503,6 +1853,7 @@ export default function Home() {
     setTransactionMemo("");
     setTransactionDateInput(formatInputDate(new Date()));
     setTransactionType("expense");
+    setTransactionCountsAsPaycheck(true);
   };
 
   const updateMainBalance = async () => {
@@ -1561,65 +1912,175 @@ export default function Home() {
     pushToast("Bank balance updated.");
   };
 
-  const updateSavings = async (newAmount: number) => {
-    if (!savings) return;
+  const updateSavings = async (savingsId: string, newAmount: number) => {
+    const goalToUpdate = savingsGoals.find((goal) => goal.id === savingsId);
+    if (!goalToUpdate) return;
 
     const { data, error } = await supabase
       .from("savings")
       .update({ current: newAmount })
-      .eq("id", savings.id)
+      .eq("id", savingsId)
       .select()
       .single();
 
     if (error) {
       logSupabaseError("Failed to update savings", error, {
-        savingsId: savings.id,
+        savingsId,
         current: newAmount,
       });
       setSyncError(getErrorMessage(error));
       return;
     }
 
-    if (data) syncSavingsState(data);
+    if (data) {
+      setSavingsGoals((current) =>
+        current.map((goal) => (goal.id === savingsId ? (data as Savings) : goal))
+      );
+    }
     setSyncError(null);
-    pushToast("Emergency fund updated.");
+    pushToast(`${goalToUpdate.name} updated.`);
   };
 
-  const updateSavingsGoal = async (newGoal: number) => {
-    if (!savings) return;
+  const updateSavingsGoal = async (savingsId: string, newGoal: number, nextName?: string) => {
+    const goalToUpdate = savingsGoals.find((goal) => goal.id === savingsId);
+    if (!goalToUpdate) return;
+
+    const trimmedName = nextName?.trim() || goalToUpdate.name;
 
     const { data, error } = await supabase
       .from("savings")
-      .update({ goal: newGoal })
-      .eq("id", savings.id)
+      .update({
+        goal: newGoal,
+        name: trimmedName,
+      })
+      .eq("id", savingsId)
       .select()
       .single();
 
     if (error) {
       logSupabaseError("Failed to update savings goal", error, {
-        savingsId: savings.id,
+        savingsId,
         goal: newGoal,
       });
       setSyncError(getErrorMessage(error));
       return;
     }
 
-    if (data) syncSavingsState(data);
+    if (data) {
+      const typedData = data as Savings;
+      if (typedData.linked_category_id || goalToUpdate.linked_category_id) {
+        await saveLinkedSavingsCategory({
+          savingsGoalName: trimmedName,
+          linkedCategoryId:
+            typedData.linked_category_id || goalToUpdate.linked_category_id || null,
+        });
+      }
+      setSavingsGoals((current) =>
+        current.map((goal) => (goal.id === savingsId ? typedData : goal))
+      );
+      setSavingsGoalEdits((current) => ({
+        ...current,
+        [savingsId]: String(Number(typedData.goal || 0)),
+      }));
+    }
     setSyncError(null);
+    pushToast(`${goalToUpdate.name} goal saved.`);
   };
 
-  const applySavingsAdjustment = async () => {
-    if (!savings) return;
-    const adjustment = Number(savingsAdjustmentInput || 0);
-    const nextAmount = Math.max(Number(savings.current || 0) + adjustment, 0);
+  const addSavingsGoal = async () => {
+    if (!userId || !newSavingsGoalName.trim()) return;
 
-    await updateSavings(nextAmount);
-    setSavingsAdjustmentInput("");
+    const trimmedName = newSavingsGoalName.trim();
+    const goalAmount = Math.max(Number(newSavingsGoalTarget || 0), 0);
+    const budgetTargetAmount = Math.max(Number(newSavingsGoalBudgetTarget || 0), 0);
+
+    const { data, error } = await supabase
+      .from("savings")
+      .insert([
+        {
+          user_id: userId,
+          name: trimmedName,
+          goal: goalAmount,
+          current: 0,
+          linked_category_id: null,
+        },
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to add savings goal", error, {
+        userId,
+        name: trimmedName,
+        goal: goalAmount,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    if (data) {
+      let typedData = data as Savings;
+
+      if (newSavingsGoalCreateBudgetRow) {
+        const linkedCategory = await saveLinkedSavingsCategory({
+          savingsGoalName: trimmedName,
+          initialMonthlyTarget: budgetTargetAmount,
+        });
+
+        if (linkedCategory) {
+          const { data: linkedSavingsData, error: linkError } = await supabase
+            .from("savings")
+            .update({ linked_category_id: linkedCategory.id })
+            .eq("id", typedData.id)
+            .select()
+            .single();
+
+          if (linkError) {
+            logSupabaseError("Failed to link savings goal to budget category", linkError, {
+              savingsId: typedData.id,
+              linkedCategoryId: linkedCategory.id,
+            });
+            setSyncError(getErrorMessage(linkError));
+          } else if (linkedSavingsData) {
+            typedData = linkedSavingsData as Savings;
+          }
+        }
+      }
+
+      setSavingsGoals((current) => [...current, typedData]);
+      setSavingsGoalEdits((current) => ({
+        ...current,
+        [typedData.id]: String(Number(typedData.goal || 0)),
+      }));
+    }
+
+    setNewSavingsGoalName("");
+    setNewSavingsGoalTarget("");
+    setNewSavingsGoalBudgetTarget("");
+    setNewSavingsGoalCreateBudgetRow(true);
+    setSyncError(null);
+    pushToast("Savings goal added.");
   };
 
-  const resetSavingsBalance = async () => {
-    await updateSavings(0);
-    setSavingsAdjustmentInput("");
+  const applySavingsAdjustment = async (savingsId: string) => {
+    const goalToUpdate = savingsGoals.find((goal) => goal.id === savingsId);
+    if (!goalToUpdate) return;
+    const adjustment = Number(savingsAdjustmentInputs[savingsId] || 0);
+    const nextAmount = Math.max(Number(goalToUpdate.current || 0) + adjustment, 0);
+
+    await updateSavings(savingsId, nextAmount);
+    setSavingsAdjustmentInputs((current) => ({
+      ...current,
+      [savingsId]: "",
+    }));
+  };
+
+  const resetSavingsBalance = async (savingsId: string) => {
+    await updateSavings(savingsId, 0);
+    setSavingsAdjustmentInputs((current) => ({
+      ...current,
+      [savingsId]: "",
+    }));
   };
 
   const saveNetWorthSnapshot = async () => {
@@ -2212,7 +2673,21 @@ export default function Home() {
     0
   );
   const monthlyIncome = Number(monthlyIncomeInput || 0);
-  const nextPayday = getNextPayday(paycheckSettings, now);
+  const latestReceivedPaycheck = paycheckHistory[0] || null;
+  const effectivePaycheckSettings = getEffectivePaycheckSettings(
+    paycheckSettings,
+    latestReceivedPaycheck
+  );
+  const receivedPaycheckToday = Boolean(
+    latestReceivedPaycheck &&
+      startOfDay(new Date(latestReceivedPaycheck.received_date)).getTime() ===
+        startOfDay(now).getTime()
+  );
+  const nextPayday = getNextPayday(
+    effectivePaycheckSettings,
+    now,
+    receivedPaycheckToday
+  );
   const daysUntilNextPayday = nextPayday ? diffInDays(now, nextPayday) : null;
 
   const currentBankBalance = accounts[0]?.current_balance || 0;
@@ -2227,10 +2702,11 @@ export default function Home() {
       const reserveAmount = getCurrentPaycheckReserveAmount(
         Number(bill.amount || 0),
         dueDate,
-        paycheckSettings,
+        effectivePaycheckSettings,
         now,
         nextPayday,
-        bill.split_across_paychecks ?? false
+        bill.split_across_paychecks ?? false,
+        receivedPaycheckToday
       );
 
       return sum + reserveAmount;
@@ -2243,9 +2719,14 @@ export default function Home() {
 
   const totalDebt = debts.reduce((sum, debt) => sum + Number(debt.balance), 0);
 
-  const savingsProgress = savings
-    ? Math.min((Number(savings.current) / Number(savings.goal)) * 100, 100)
-    : 0;
+  const totalSavingsCurrent = savingsGoals.reduce(
+    (sum, goal) => sum + Number(goal.current || 0),
+    0
+  );
+  const totalSavingsGoal = savingsGoals.reduce(
+    (sum, goal) => sum + Number(goal.goal || 0),
+    0
+  );
 
   const categoryRows = categories.map((cat) => {
     const weeklySpent = weeklyTransactions
@@ -2438,10 +2919,11 @@ export default function Home() {
       const reserveAmount = getCurrentPaycheckReserveAmount(
         target,
         dueDate,
-        paycheckSettings,
+        effectivePaycheckSettings,
         now,
         nextPayday,
-        bill.split_across_paychecks ?? false
+        bill.split_across_paychecks ?? false,
+        receivedPaycheckToday
       );
       const isSplitBill =
         (bill.split_across_paychecks ?? false) && reserveAmount > 0 && reserveAmount < target;
@@ -2483,10 +2965,11 @@ export default function Home() {
           ? getCurrentPaycheckReserveAmount(
               target,
               targetDate,
-              paycheckSettings,
+              effectivePaycheckSettings,
               now,
               nextPayday,
-              category.split_across_paychecks ?? false
+              category.split_across_paychecks ?? false,
+              receivedPaycheckToday
             )
           : target;
       const reservesBeforePayday =
@@ -2602,10 +3085,8 @@ export default function Home() {
   );
   const cashReservedUntilPayday =
     upcomingBillsBeforePaydayTotal + assignedGoalReserve + protectedBuffer;
-  const cashAvailableUntilPayday = Math.max(
-    currentBankBalance - cashReservedUntilPayday,
-    0
-  );
+  const flexibleCashNow = currentBankBalance - cashReservedUntilPayday;
+  const cashAvailableUntilPayday = Math.max(flexibleCashNow, 0);
   const daysUntilPaydayWindow = Math.max(daysUntilNextPayday ?? getDaysRemainingInMonth(now), 1);
   const dailyCashAllowance = cashAvailableUntilPayday / daysUntilPaydayWindow;
   const dailyFundedAllowance = fundedSpendingRemaining / daysUntilPaydayWindow;
@@ -2631,6 +3112,7 @@ export default function Home() {
     safeThisWeek,
     Math.max(availableCash, 0)
   );
+  const safeDailyPace = dailySafeToSpend;
   const nextFriday = new Date(now);
   nextFriday.setDate(now.getDate() + ((5 - now.getDay() + 7) % 7));
   const daysUntilFriday = Math.max(diffInDays(now, nextFriday), 1);
@@ -2644,8 +3126,8 @@ export default function Home() {
     0
   );
   const cashRunwayDays =
-    dailySafeToSpend > 0
-      ? Math.max(Math.floor(cashAvailableUntilPayday / dailySafeToSpend), 0)
+    safeDailyPace > 0
+      ? Math.max(Math.floor(cashAvailableUntilPayday / safeDailyPace), 0)
       : cashAvailableUntilPayday > 0
         ? daysUntilPaydayWindow
         : 0;
@@ -2653,7 +3135,7 @@ export default function Home() {
   const safeToSpendStatus =
     safeToSpend <= 0
       ? "Overspending risk 🚨"
-      : `${formatCurrency(dailySafeToSpend)} safe today • ${formatCurrency(safeThisWeek)} safe this week • ${formatCurrency(Math.max(readyToAssign, 0))} still unassigned`;
+      : `${formatCurrency(safeDailyPace)} safe daily pace • ${formatCurrency(flexibleCashNow)} flexible cash now • ${formatCurrency(safeThisWeek)} safe this week`;
   const cashTimeline = [...upcomingBillsBeforePayday]
     .sort((a, b) => a.sortOrder - b.sortOrder)
     .map((bill, index, allBills) => {
@@ -2721,6 +3203,10 @@ export default function Home() {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   };
+  const desktopPanelPaddingClass =
+    workspaceDensity === "compact" ? "lg:p-3.5" : "lg:p-4";
+  const desktopCardPaddingClass =
+    workspaceDensity === "compact" ? "lg:p-3" : "lg:p-4";
   const topOverspendingCategories = overspendingDefense
     .filter((cat) => cat.weeklyRemaining <= 0 || cat.monthlyRemaining <= 0)
     .slice(0, 2)
@@ -2741,6 +3227,58 @@ export default function Home() {
             : fundedSpendingRemaining <= 0
               ? "Your funded spending categories do not have any room left."
               : "Your weekly safe-to-spend room is currently used up.";
+  const flexibleCashBreakdown = [
+    {
+      label: "Bank balance",
+      value: formatCurrency(currentBankBalance),
+    },
+    {
+      label: "Bills before payday",
+      value: `-${formatCurrency(upcomingBillsBeforePaydayTotal)}`,
+      tone: upcomingBillsBeforePaydayTotal > 0 ? "negative" : "default",
+    },
+    {
+      label: "Goal reserves",
+      value: `-${formatCurrency(assignedGoalReserve)}`,
+      tone: assignedGoalReserve > 0 ? "negative" : "default",
+    },
+    {
+      label: "Protected buffer",
+      value: `-${formatCurrency(protectedBuffer)}`,
+      tone: "negative",
+    },
+    {
+      label: "Flexible cash now",
+      value: formatCurrency(flexibleCashNow),
+      tone: flexibleCashNow >= 0 ? "positive" : "negative",
+    },
+  ] as const;
+  const safeDailyPaceBreakdown = [
+    {
+      label: "Cash runway pace",
+      value: formatCurrency(dailyCashAllowance),
+    },
+    {
+      label: "Funded category pace",
+      value: formatCurrency(dailyFundedAllowance),
+    },
+    {
+      label: "Unassigned cash pace",
+      value: formatCurrency(dailyUnassignedAllowance),
+      tone: dailyUnassignedAllowance > 0 ? "positive" : "default",
+    },
+    {
+      label: "Safe daily pace",
+      value: formatCurrency(safeDailyPace),
+      tone: safeDailyPace > 0 ? "positive" : "default",
+    },
+  ] as const;
+  const todayFocusLabel =
+    safeToSpend <= 0
+      ? "Protect cash flow"
+      : safeDailyPace >= 25
+        ? "Comfortable pace"
+        : "Stay paced";
   const canAfford =
     Number(planned || 0) <= safeToSpend &&
     Number(planned || 0) <= availableCash;
@@ -2888,7 +3426,7 @@ export default function Home() {
             </button>
           </div>
 
-          <div className="mt-6 hidden gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(360px,0.8fr)] lg:items-end lg:grid">
+          <div className="mt-6 hidden gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)] lg:items-end lg:grid">
             <div>
               <h1 className="text-5xl font-bold text-cyan-300 drop-shadow-[0_0_16px_rgba(34,211,238,0.45)] sm:text-6xl">
             ${safeToSpend.toFixed(2)}
@@ -2900,20 +3438,35 @@ export default function Home() {
               <p className="mt-2 max-w-xl text-sm text-slate-400">
                 {safeToSpendReason}
               </p>
+
+              <div className="mt-5 flex flex-wrap gap-3">
+                <div className="rounded-full border border-slate-700/80 bg-slate-950/35 px-4 py-2">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">This Week</p>
+                  <p className={safeThisWeek <= 0 ? "mt-1 text-base text-red-300" : "mt-1 text-base text-slate-50"}>
+                    {formatCurrency(safeThisWeek)}
+                  </p>
+                </div>
+                <div className="rounded-full border border-slate-700/80 bg-slate-950/35 px-4 py-2">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Safe By Friday</p>
+                  <p className="mt-1 text-base text-slate-50">
+                    {formatCurrency(fridayNumberAfterPlanned)}
+                  </p>
+                </div>
+                <div className="rounded-full border border-slate-700/80 bg-slate-950/35 px-4 py-2">
+                  <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">Underfunded</p>
+                  <p className="mt-1 text-base text-slate-50">
+                    {formatCurrency(underfundedTotal)}
+                  </p>
+                </div>
+              </div>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-2">
-              <MetricCard label="Safe Today" value={formatCurrency(dailySafeToSpend)} valueClassName="mt-3 text-3xl text-slate-50" />
+            <div className="grid gap-3 sm:grid-cols-2">
+              <MetricCard label="Safe Daily Pace" value={formatCurrency(safeDailyPace)} valueClassName="mt-3 text-3xl text-slate-50" />
               <MetricCard
-                label="Safe This Week"
-                value={formatCurrency(safeThisWeek)}
-                valueClassName={safeThisWeek <= 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}
-              />
-              <MetricCard label="Bank Balance" value={formatCurrency(currentBankBalance)} valueClassName="mt-3 text-3xl text-slate-50" />
-              <MetricCard
-                label="Available Cash"
-                value={formatCurrency(availableCash)}
-                valueClassName={availableCash < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}
+                label="Flexible Cash Now"
+                value={formatCurrency(flexibleCashNow)}
+                valueClassName={flexibleCashNow < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-slate-50"}
               />
               <MetricCard
                 label="Next Payday"
@@ -2925,8 +3478,6 @@ export default function Home() {
                 value={formatCurrency(readyToAssign)}
                 valueClassName={readyToAssign < 0 ? "mt-3 text-3xl text-red-400" : "mt-3 text-3xl text-emerald-400"}
               />
-              <MetricCard label="Safe By Friday" value={formatCurrency(fridayNumberAfterPlanned)} valueClassName="mt-3 text-3xl text-slate-50" />
-              <MetricCard label="Underfunded" value={formatCurrency(underfundedTotal)} valueClassName="mt-3 text-3xl text-slate-50" />
             </div>
           </div>
 
@@ -2943,11 +3494,11 @@ export default function Home() {
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <MetricCard label="Safe Today" value={formatCurrency(dailySafeToSpend)} />
+              <MetricCard label="Safe Daily Pace" value={formatCurrency(safeDailyPace)} />
               <MetricCard
-                label="Available Cash"
-                value={formatCurrency(availableCash)}
-                valueClassName={availableCash < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
+                label="Flexible Cash Now"
+                value={formatCurrency(flexibleCashNow)}
+                valueClassName={flexibleCashNow < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
               />
               <MetricCard
                 label="Next Payday"
@@ -2989,6 +3540,17 @@ export default function Home() {
                 valueClassName={safeThisWeek <= 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
               />
               <MetricCard label="Underfunded" value={formatCurrency(underfundedTotal)} />
+            </div>
+
+            <div className="grid gap-3">
+              <BreakdownCard
+                title="Flexible Cash Now"
+                rows={[...flexibleCashBreakdown]}
+              />
+              <BreakdownCard
+                title="Safe Daily Pace"
+                rows={[...safeDailyPaceBreakdown]}
+              />
             </div>
           </div>
 
@@ -3039,7 +3601,7 @@ export default function Home() {
             </div>
             <p className="max-w-[180px] text-right text-xs text-slate-500">
               {activeMobileTab === "home"
-                ? "Daily overview and alerts"
+                ? `${todayFocusLabel} today`
                 : activeMobileTab === "budget"
                   ? "Assign money and edit targets"
                   : activeMobileTab === "spending"
@@ -3055,8 +3617,8 @@ export default function Home() {
           <div className="sticky top-[4.9rem] z-20 rounded-2xl border border-cyan-400/20 bg-[#10192c]/92 px-4 py-3 shadow-[0_10px_30px_rgba(0,0,0,0.28)] backdrop-blur">
             <div className="flex items-center justify-between gap-4">
               <div>
-                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Safe Today</p>
-                <p className="mt-1 text-lg text-cyan-300">{formatCurrency(dailySafeToSpend)}</p>
+                <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Safe Daily Pace</p>
+                <p className="mt-1 text-lg text-cyan-300">{formatCurrency(safeDailyPace)}</p>
               </div>
               <div className="text-right">
                 <p className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Ready To Assign</p>
@@ -3071,10 +3633,17 @@ export default function Home() {
             <div className="-mx-4 mt-3 overflow-x-auto px-4 pb-1">
               <div className="flex snap-x snap-mandatory gap-3">
                 <MetricCard
+                  className="min-w-[240px] snap-start"
+                  label="Today Focus"
+                  value={todayFocusLabel}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail={safeToSpendReason}
+                />
+                <MetricCard
                   className="min-w-[220px] snap-start"
-                  label="Available Cash"
-                  value={formatCurrency(availableCash)}
-                  valueClassName={availableCash < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
+                  label="Flexible Cash Now"
+                  value={formatCurrency(flexibleCashNow)}
+                  valueClassName={flexibleCashNow < 0 ? "mt-2 text-2xl text-red-400" : "mt-2 text-2xl text-slate-50"}
                 />
                 <MetricCard
                   className="min-w-[220px] snap-start"
@@ -3104,11 +3673,39 @@ export default function Home() {
 
         <div className="grid gap-5 lg:grid-cols-12">
         <aside className="order-1 hidden self-start lg:sticky lg:top-6 lg:col-span-2 lg:block">
-          <div className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+          <div className={`rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] ${desktopPanelPaddingClass}`.trim()}>
             <p className="text-sm text-gray-400">Workspace</p>
             <p className="mt-1 text-xs text-gray-500">
               Pick the area you want to work in. The center updates to that workflow.
             </p>
+
+            <div className="mt-4 rounded-2xl border border-slate-800 bg-black/20 p-2">
+              <p className="px-2 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                Density
+              </p>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setWorkspaceDensity("compact")}
+                  className={
+                    workspaceDensity === "compact"
+                      ? "rounded-xl border border-cyan-400 bg-cyan-400/12 px-3 py-2 text-xs uppercase tracking-[0.16em] text-cyan-200"
+                      : "rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs uppercase tracking-[0.16em] text-slate-400"
+                  }
+                >
+                  Compact
+                </button>
+                <button
+                  onClick={() => setWorkspaceDensity("comfortable")}
+                  className={
+                    workspaceDensity === "comfortable"
+                      ? "rounded-xl border border-cyan-400 bg-cyan-400/12 px-3 py-2 text-xs uppercase tracking-[0.16em] text-cyan-200"
+                      : "rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs uppercase tracking-[0.16em] text-slate-400"
+                  }
+                >
+                  Comfortable
+                </button>
+              </div>
+            </div>
 
             <div className="mt-4 space-y-2">
               {MOBILE_TABS.map((tab) => (
@@ -3144,50 +3741,189 @@ export default function Home() {
         <div className="order-2 min-w-0 lg:col-span-7">
         <div className="grid gap-5 lg:grid-cols-2 2xl:grid-cols-12">
         <aside className="order-3 hidden self-start 2xl:sticky 2xl:top-6 2xl:col-span-3 2xl:block">
-          <div className="rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)]">
+          <div className={`rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] ${desktopPanelPaddingClass}`.trim()}>
             <div className="flex items-center justify-between">
-              <p className="text-sm text-gray-400">Desktop Summary</p>
+              <p className="text-sm text-gray-400">Today Rail</p>
               <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-cyan-200">
                 Live
               </span>
             </div>
 
             <div className="mt-4 grid gap-3">
-              <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Safe Today</p>
-                <p className="mt-2 text-3xl text-slate-50">{formatCurrency(dailySafeToSpend)}</p>
+              <div className={`rounded-2xl border border-slate-800 bg-black/30 p-4 text-sm text-slate-300 ${desktopCardPaddingClass}`.trim()}>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Today Focus</p>
+                <p className="mt-2 text-sm text-cyan-200">{todayFocusLabel}</p>
+                <p className="mt-2 text-sm text-slate-400">{safeToSpendReason}</p>
               </div>
-              <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Available Cash</p>
-                <p className={availableCash < 0 ? "mt-2 text-3xl text-red-400" : "mt-2 text-3xl text-slate-50"}>
-                  {formatCurrency(availableCash)}
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Payday</p>
-                  <p className="mt-2 text-base text-slate-50">
-                    {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "--"}
-                  </p>
-                </div>
-                <div className="rounded-2xl border border-slate-800 bg-black/30 p-4">
-                  <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Unassigned</p>
-                  <p className={readyToAssign < 0 ? "mt-2 text-base text-red-400" : "mt-2 text-base text-emerald-300"}>
-                    {formatCurrency(readyToAssign)}
-                  </p>
+
+              <div className={`rounded-2xl border border-slate-800 bg-black/30 p-4 ${desktopCardPaddingClass}`.trim()}>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Cash</p>
+                <div className="mt-3 grid gap-3">
+                  <div className="flex items-end justify-between gap-3">
+                    <div>
+                      <p className="text-xs text-slate-500">Flexible now</p>
+                      <p className={flexibleCashNow < 0 ? "mt-1 text-2xl text-red-400" : "mt-1 text-2xl text-slate-50"}>
+                        {formatCurrency(flexibleCashNow)}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500">Bank balance</p>
+                      <p className="mt-1 text-base text-slate-50">{formatCurrency(currentBankBalance)}</p>
+                    </div>
+                  </div>
+                  <BreakdownCard
+                    title="Cash Breakdown"
+                    rows={[...flexibleCashBreakdown]}
+                    density={workspaceDensity}
+                    className="border-0 bg-slate-950/40 p-0"
+                  />
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-slate-800 bg-black/30 p-4 text-sm text-slate-300">
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Why this matters</p>
-                <p className="mt-2 text-sm text-slate-400">{safeToSpendReason}</p>
+              <div className={`rounded-2xl border border-slate-800 bg-black/30 p-4 ${desktopCardPaddingClass}`.trim()}>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Pace</p>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-xs text-slate-500">Daily pace</p>
+                    <p className="mt-1 text-xl text-slate-50">{formatCurrency(safeDailyPace)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500">This week</p>
+                    <p className={safeThisWeek <= 0 ? "mt-1 text-xl text-red-400" : "mt-1 text-xl text-slate-50"}>
+                      {formatCurrency(safeThisWeek)}
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <BreakdownCard
+                    title="Pace Breakdown"
+                    rows={[...safeDailyPaceBreakdown]}
+                    density={workspaceDensity}
+                    className="border-0 bg-slate-950/40 p-0"
+                  />
+                </div>
+              </div>
+
+              <div className={`rounded-2xl border border-slate-800 bg-black/30 p-4 ${desktopCardPaddingClass}`.trim()}>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Risk & Timing</p>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <div>
+                    <p className="text-xs text-slate-500">Next payday</p>
+                    <p className="mt-1 text-base text-slate-50">
+                      {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "--"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500">Unassigned</p>
+                    <p className={readyToAssign < 0 ? "mt-1 text-base text-red-400" : "mt-1 text-base text-emerald-300"}>
+                      {formatCurrency(readyToAssign)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500">Safe by Friday</p>
+                    <p className="mt-1 text-base text-slate-50">{formatCurrency(fridayNumberAfterPlanned)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-slate-500">Underfunded</p>
+                    <p className="mt-1 text-base text-slate-50">{formatCurrency(underfundedTotal)}</p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </aside>
         <DashboardPanel
+          className={`${mobileSectionClass("home")} hidden lg:block lg:col-span-2 2xl:col-span-9`}
+          title="Today Workspace"
+          subtitle="Start here to decide what you can spend, what needs attention, and where to go next."
+          density={workspaceDensity}
+          right={
+            <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-cyan-200">
+              {todayFocusLabel}
+            </span>
+          }
+        >
+          <div className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr]">
+            <div className="rounded-2xl border border-slate-800 bg-black/25 p-4">
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                Today Summary
+              </p>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <MetricCard
+                  label="Safe Daily Pace"
+                  value={formatCurrency(safeDailyPace)}
+                  density={workspaceDensity}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                />
+                <MetricCard
+                  label="Flexible Cash Now"
+                  value={formatCurrency(flexibleCashNow)}
+                  density={workspaceDensity}
+                  valueClassName={
+                    flexibleCashNow < 0
+                      ? "mt-2 text-2xl text-red-400"
+                      : "mt-2 text-2xl text-slate-50"
+                  }
+                />
+                <MetricCard
+                  label="Next Payday"
+                  value={
+                    nextPayday
+                      ? nextPayday.toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                        })
+                      : "Set schedule"
+                  }
+                  density={workspaceDensity}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                />
+                <MetricCard
+                  label="Ready To Assign"
+                  value={formatCurrency(readyToAssign)}
+                  density={workspaceDensity}
+                  valueClassName={
+                    readyToAssign < 0
+                      ? "mt-2 text-2xl text-red-400"
+                      : "mt-2 text-2xl text-emerald-400"
+                  }
+                />
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-black/25 p-4">
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                Quick Actions
+              </p>
+              <div className="mt-3 grid gap-2">
+                <ActionButton
+                  onClick={() => selectMobileTab("spending")}
+                  tone="primary"
+                  className="justify-start text-left"
+                >
+                  Add spending or income
+                </ActionButton>
+                <ActionButton
+                  onClick={() => selectMobileTab("budget")}
+                  className="justify-start text-left"
+                >
+                  Assign money and fund categories
+                </ActionButton>
+                <ActionButton
+                  onClick={() => selectMobileTab("bills")}
+                  tone="ghost"
+                  className="justify-start text-left"
+                >
+                  Review bills before payday
+                </ActionButton>
+              </div>
+            </div>
+          </div>
+        </DashboardPanel>
+        <DashboardPanel
           className={`${mobileSectionClass("budget")} lg:col-span-2 2xl:col-span-5`}
           title="Budget Planner"
+          density={workspaceDensity}
           right={
             <p className={readyToAssign < 0 ? "text-sm text-red-400" : "text-sm text-green-400"}>
               {readyToAssign < 0 ? "Over-assigned" : "Ready to assign"} {formatCurrency(Math.abs(readyToAssign))}
@@ -3240,6 +3976,7 @@ export default function Home() {
         <DashboardPanel
           className={`${mobileSectionClass("bills")} lg:col-span-2 2xl:col-span-7`}
           title="Paycheck Calendar"
+          density={workspaceDensity}
           right={
             <p className={cashCoversUntilPayday ? "text-sm text-emerald-400" : "text-sm text-red-400"}>
               {cashCoversUntilPayday ? "Covered to payday" : "Short before payday"}
@@ -3348,6 +4085,23 @@ export default function Home() {
 
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Last paycheck</p>
+                <p className="mt-2 text-lg text-slate-50">
+                  {latestReceivedPaycheck
+                    ? new Date(latestReceivedPaycheck.received_date).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })
+                    : "Not recorded yet"}
+                </p>
+                <p className="text-xs text-gray-500">
+                  {latestReceivedPaycheck?.amount
+                    ? `${formatCurrency(Number(latestReceivedPaycheck.amount))} received`
+                    : "Mark an income transaction or check in manually."}
+                </p>
+              </div>
+              <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
                 <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Next payday</p>
                 <p className="mt-2 text-lg text-slate-50">
                   {nextPayday ? nextPayday.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "Set pay schedule"}
@@ -3374,13 +4128,49 @@ export default function Home() {
                 </p>
               </div>
             </div>
+
+            <div className="rounded-xl border border-gray-800 bg-black/20 p-3">
+              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+                <FieldLabel
+                  label="Received on"
+                  helper="Use this when the paycheck actually lands."
+                  className="text-sm text-gray-300"
+                >
+                  <input
+                    value={manualPaycheckDateInput}
+                    onChange={(e) => setManualPaycheckDateInput(e.target.value)}
+                    type="date"
+                    className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                  />
+                </FieldLabel>
+                <FieldLabel
+                  label="Amount"
+                  helper="Optional, but helpful for paycheck history."
+                  className="text-sm text-gray-300"
+                >
+                  <input
+                    value={manualPaycheckAmountInput}
+                    onChange={(e) => setManualPaycheckAmountInput(e.target.value)}
+                    type="number"
+                    placeholder="Optional"
+                    className="w-full rounded-xl border border-gray-700 bg-[#0A0F1C] p-3"
+                  />
+                </FieldLabel>
+                <div className="flex items-end">
+                  <ActionButton onClick={() => void markPaycheckReceived()} className="w-full">
+                    Mark Received
+                  </ActionButton>
+                </div>
+              </div>
+            </div>
           </div>
         </DashboardPanel>
 
         <DashboardPanel
-          className={`${mobileSectionClass("bills")} lg:col-span-2 2xl:col-span-4`}
+          className={`${mobileSectionClass(["home", "bills"])} lg:col-span-2 2xl:col-span-4`}
           title="Account Balance Trend"
           subtitle="Estimated last 7 days"
+          density={workspaceDensity}
         >
           <div className="mt-1 grid grid-cols-7 items-end gap-2">
             {accountBalanceTrend.map((day) => (
@@ -3401,9 +4191,10 @@ export default function Home() {
         </DashboardPanel>
 
         <DashboardPanel
-          className={`${mobileSectionClass("bills")} lg:col-span-2 2xl:col-span-4`}
+          className={`${mobileSectionClass(["home", "bills"])} lg:col-span-2 2xl:col-span-4`}
           title="Cash vs Bills Due"
           subtitle="Before next paycheck"
+          density={workspaceDensity}
         >
           <div className="space-y-3">
             {cashTimeline.length > 0 ? (
@@ -3433,6 +4224,7 @@ export default function Home() {
           className={`${mobileSectionClass("spending")} lg:col-span-2 2xl:col-span-4`}
           title="Category Breakdown"
           subtitle="Month to date"
+          density={workspaceDensity}
         >
           <div className="space-y-3">
             {categoryBreakdown.length > 0 ? (
@@ -3769,6 +4561,23 @@ export default function Home() {
             type="date"
             className="w-full rounded-xl bg-black border border-gray-700 p-3"
           />
+
+          {transactionType === "income" ? (
+            <label className="flex items-center justify-between gap-3 rounded-xl border border-emerald-400/20 bg-emerald-400/8 px-4 py-3 text-sm text-emerald-100">
+              <div>
+                <p className="font-medium text-emerald-200">Treat this income as a paycheck</p>
+                <p className="mt-1 text-xs text-emerald-100/70">
+                  This will mark the paycheck as received and roll the next one forward.
+                </p>
+              </div>
+              <input
+                checked={transactionCountsAsPaycheck}
+                onChange={(e) => setTransactionCountsAsPaycheck(e.target.checked)}
+                type="checkbox"
+                className="h-4 w-4 accent-emerald-400"
+              />
+            </label>
+          ) : null}
 
           <input
             value={amount}
@@ -4133,7 +4942,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4`}>
+        <section className={`${mobileSectionClass(["home", "spending"])} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4`}>
           <p className="text-sm text-gray-400">Can I Afford This?</p>
           <input
             value={planned}
@@ -4257,7 +5066,7 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`${mobileSectionClass("spending")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
+        <section className={`${mobileSectionClass(["home", "spending"])} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
           <p className="text-sm text-gray-400">Monthly Budget</p>
           <p className="text-2xl mt-1">
             ${monthlySpentTotal.toFixed(2)} / ${monthlyBudgetTotal.toFixed(2)}
@@ -4274,65 +5083,209 @@ export default function Home() {
         </section>
 
         <section className={`${mobileSectionClass("plan")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-3`}>
-          <p className="text-sm text-gray-400">Emergency Fund</p>
-          <p className="text-2xl">
-            ${Number(savings?.current || 0).toFixed(2)} / ${Number(savings?.goal || 1000).toFixed(2)}
-          </p>
-
-          <div className="mt-2 h-2 rounded-full bg-gray-800 overflow-hidden">
-            <div
-              className="h-full bg-green-400"
-              style={{ width: `${savingsProgress}%` }}
-            />
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm text-gray-400">Savings Goals</p>
+              <p className="mt-1 text-xs text-gray-500">
+                {formatCurrency(totalSavingsCurrent)} saved across {savingsGoals.length} goal{savingsGoals.length === 1 ? "" : "s"}
+              </p>
+            </div>
+            <p className="text-sm text-emerald-300">
+              {formatCurrency(totalSavingsGoal)}
+            </p>
           </div>
 
-          <label className="mt-3 block text-sm text-gray-300">
-            <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
-              Savings Goal
-            </span>
-            <div className="flex gap-2">
+          <div className="mt-4 rounded-xl border border-gray-700 bg-black/30 p-3">
+            <p className="text-sm text-gray-300">Add Savings Goal</p>
+            <div className="mt-3 grid gap-2">
               <input
-                value={savingsGoalInput}
-                onChange={(e) => setSavingsGoalInput(e.target.value)}
-                type="number"
+                value={newSavingsGoalName}
+                onChange={(e) => setNewSavingsGoalName(e.target.value)}
+                placeholder="Goal name"
                 className="w-full rounded-xl bg-black border border-gray-700 p-3"
               />
+              <input
+                value={newSavingsGoalTarget}
+                onChange={(e) => setNewSavingsGoalTarget(e.target.value)}
+                type="number"
+                placeholder="Target amount"
+                className="w-full rounded-xl bg-black border border-gray-700 p-3"
+              />
+              <label className="flex items-center justify-between rounded-xl border border-gray-800 bg-[#0A0F1C] px-4 py-3 text-sm text-gray-300">
+                <span>Create matching budget row</span>
+                <input
+                  checked={newSavingsGoalCreateBudgetRow}
+                  onChange={(e) => setNewSavingsGoalCreateBudgetRow(e.target.checked)}
+                  type="checkbox"
+                  className="h-4 w-4 accent-cyan-400"
+                />
+              </label>
+              {newSavingsGoalCreateBudgetRow ? (
+                <input
+                  value={newSavingsGoalBudgetTarget}
+                  onChange={(e) => setNewSavingsGoalBudgetTarget(e.target.value)}
+                  type="number"
+                  placeholder="Monthly budget target"
+                  className="w-full rounded-xl bg-black border border-gray-700 p-3"
+                />
+              ) : null}
               <ActionButton
-                onClick={() => void updateSavingsGoal(Math.max(Number(savingsGoalInput || 0), 0))}
-                className="shrink-0"
+                onClick={() => void addSavingsGoal()}
+                className="w-full"
               >
-                Save
+                Add Goal
               </ActionButton>
             </div>
-          </label>
+          </div>
 
-          <label className="mt-3 block text-sm text-gray-300">
-            <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
-              Add Or Remove Amount
-            </span>
-            <input
-              value={savingsAdjustmentInput}
-              onChange={(e) => setSavingsAdjustmentInput(e.target.value)}
-              type="number"
-              placeholder="Use negative numbers to subtract"
-              className="w-full rounded-xl bg-black border border-gray-700 p-3"
-            />
-          </label>
+          <div className="mt-4 space-y-3">
+            {savingsGoals.map((goal) => {
+              const goalProgress =
+                Number(goal.goal || 0) > 0
+                  ? Math.min((Number(goal.current || 0) / Number(goal.goal || 1)) * 100, 100)
+                  : 0;
 
-          <div className="mt-3 flex gap-2">
-            <ActionButton
-              onClick={() => void applySavingsAdjustment()}
-              tone="secondary"
-              className="flex-1 border-green-400 py-2 text-green-300"
-            >
-              Apply Change
-            </ActionButton>
-            <ActionButton
-              onClick={() => void resetSavingsBalance()}
-              tone="danger"
-            >
-              Reset
-            </ActionButton>
+              return (
+                <div key={goal.id} className="rounded-xl border border-gray-800 bg-black/30 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <p className="text-xs uppercase tracking-[0.18em] text-gray-500">
+                      {goal.linked_category_id ? "Linked to budget" : "Not in budget yet"}
+                    </p>
+                    {!goal.linked_category_id ? (
+                      <ActionButton
+                        onClick={async () => {
+                          const linkedCategory = await saveLinkedSavingsCategory({
+                            savingsGoalName: goal.name,
+                            initialMonthlyTarget: 0,
+                          });
+
+                          if (!linkedCategory) return;
+
+                          const { data: linkedSavingsData, error: linkError } = await supabase
+                            .from("savings")
+                            .update({ linked_category_id: linkedCategory.id })
+                            .eq("id", goal.id)
+                            .select()
+                            .single();
+
+                          if (linkError) {
+                            logSupabaseError("Failed to back-link savings goal to budget category", linkError, {
+                              savingsId: goal.id,
+                              linkedCategoryId: linkedCategory.id,
+                            });
+                            setSyncError(getErrorMessage(linkError));
+                            return;
+                          }
+
+                          if (linkedSavingsData) {
+                            setSavingsGoals((current) =>
+                              current.map((entry) =>
+                                entry.id === goal.id ? (linkedSavingsData as Savings) : entry
+                              )
+                            );
+                          }
+
+                          setSyncError(null);
+                          pushToast("Budget row created for savings goal.");
+                        }}
+                        tone="ghost"
+                        className="px-3 py-1 text-xs"
+                      >
+                        Create Budget Row
+                      </ActionButton>
+                    ) : null}
+                  </div>
+                  <input
+                    value={goal.name}
+                    onChange={(e) =>
+                      setSavingsGoals((current) =>
+                        current.map((entry) =>
+                          entry.id === goal.id
+                            ? { ...entry, name: e.target.value }
+                            : entry
+                        )
+                      )
+                    }
+                    className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3 text-slate-50"
+                  />
+                  <p className="mt-3 text-xl">
+                    {formatCurrency(Number(goal.current || 0))} / {formatCurrency(Number(goal.goal || 0))}
+                  </p>
+
+                  <div className="mt-2 h-2 rounded-full bg-gray-800 overflow-hidden">
+                    <div
+                      className="h-full bg-green-400"
+                      style={{ width: `${goalProgress}%` }}
+                    />
+                  </div>
+
+                  <label className="mt-3 block text-sm text-gray-300">
+                    <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                      Goal Target
+                    </span>
+                    <div className="flex gap-2">
+                      <input
+                        value={savingsGoalEdits[goal.id] ?? String(Number(goal.goal || 0))}
+                        onChange={(e) =>
+                          setSavingsGoalEdits((current) => ({
+                            ...current,
+                            [goal.id]: e.target.value,
+                          }))
+                        }
+                        type="number"
+                        className="w-full rounded-xl bg-black border border-gray-700 p-3"
+                      />
+                      <ActionButton
+                        onClick={() =>
+                          void updateSavingsGoal(
+                            goal.id,
+                            Math.max(Number(savingsGoalEdits[goal.id] || 0), 0),
+                            goal.name
+                          )
+                        }
+                        className="shrink-0"
+                      >
+                        Save
+                      </ActionButton>
+                    </div>
+                  </label>
+
+                  <label className="mt-3 block text-sm text-gray-300">
+                    <span className="mb-2 block text-xs uppercase tracking-[0.18em] text-gray-500">
+                      Add Or Remove Amount
+                    </span>
+                    <input
+                      value={savingsAdjustmentInputs[goal.id] || ""}
+                      onChange={(e) =>
+                        setSavingsAdjustmentInputs((current) => ({
+                          ...current,
+                          [goal.id]: e.target.value,
+                        }))
+                      }
+                      type="number"
+                      placeholder="Use negative numbers to subtract"
+                      className="w-full rounded-xl bg-black border border-gray-700 p-3"
+                    />
+                  </label>
+
+                  <div className="mt-3 flex gap-2">
+                    <ActionButton
+                      onClick={() => void applySavingsAdjustment(goal.id)}
+                      tone="secondary"
+                      className="flex-1 border-green-400 py-2 text-green-300"
+                    >
+                      Apply Change
+                    </ActionButton>
+                    <ActionButton
+                      onClick={() => void resetSavingsBalance(goal.id)}
+                      tone="danger"
+                    >
+                      Reset
+                    </ActionButton>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </section>
 
@@ -4594,6 +5547,7 @@ export default function Home() {
         <DashboardPanel
           className={`${mobileSectionClass("plan")} 2xl:col-span-3`}
           title="Net Worth Snapshot"
+          density={workspaceDensity}
         >
           {netWorth ? (
             <>
@@ -4681,8 +5635,9 @@ export default function Home() {
         </DashboardPanel>
 
         <DashboardPanel
-          className={`${mobileSectionClass("spending")} 2xl:col-span-3`}
+          className={`${mobileSectionClass(["home", "spending"])} 2xl:col-span-3`}
           title="Recent Transactions"
+          density={workspaceDensity}
         >
 
           <div className="rounded-xl border border-gray-800 bg-black/30 p-3">
