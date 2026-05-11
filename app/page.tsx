@@ -5197,6 +5197,9 @@ export default function Home() {
                 max="31"
                 className="w-full rounded-xl bg-black border border-gray-700 p-3"
               />
+              <span className="mt-2 block text-xs text-gray-500">
+                Optional. Use this when the category needs to be ready by a specific day of the month.
+              </span>
             </label>
           </div>
 
@@ -5409,7 +5412,11 @@ export default function Home() {
                       className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
                     />
                   </FieldLabel>
-                  <FieldLabel label="Target Day" className="col-span-2">
+                  <FieldLabel
+                    label="Target Day"
+                    helper="Optional. Set a day of month when this category needs to be ready."
+                    className="col-span-2"
+                  >
                     <input
                       value={category.target_day ? String(category.target_day) : ""}
                       onChange={(e) => updateCategoryField(category.id, "target_day", e.target.value)}
