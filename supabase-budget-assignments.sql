@@ -16,12 +16,12 @@ create table if not exists public.budget_assignments (
 create or replace function public.set_budget_assignments_updated_at()
 returns trigger
 language plpgsql
-as $function$
+as '
 begin
-  new.updated_at = timezone('utc', now());
+  new.updated_at = timezone(''utc'', now());
   return new;
 end;
-$function$;
+';
 
 drop trigger if exists set_budget_assignments_updated_at on public.budget_assignments;
 

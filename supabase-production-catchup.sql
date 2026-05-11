@@ -92,23 +92,6 @@ create table if not exists public.paycheck_settings (
   updated_at timestamptz not null default timezone('utc', now())
 );
 
-create or replace function public.set_paycheck_settings_updated_at()
-returns trigger
-language plpgsql
-as $function$
-begin
-  new.updated_at = timezone('utc', now());
-  return new;
-end;
-$function$;
-
-drop trigger if exists set_paycheck_settings_updated_at on public.paycheck_settings;
-
-create trigger set_paycheck_settings_updated_at
-before update on public.paycheck_settings
-for each row
-execute function public.set_paycheck_settings_updated_at();
-
 alter table public.paycheck_settings enable row level security;
 
 create table if not exists public.monthly_budget_state (
@@ -120,23 +103,6 @@ create table if not exists public.monthly_budget_state (
   updated_at timestamptz not null default timezone('utc', now()),
   unique (user_id, month_key)
 );
-
-create or replace function public.set_monthly_budget_state_updated_at()
-returns trigger
-language plpgsql
-as $function$
-begin
-  new.updated_at = timezone('utc', now());
-  return new;
-end;
-$function$;
-
-drop trigger if exists set_monthly_budget_state_updated_at on public.monthly_budget_state;
-
-create trigger set_monthly_budget_state_updated_at
-before update on public.monthly_budget_state
-for each row
-execute function public.set_monthly_budget_state_updated_at();
 
 alter table public.monthly_budget_state enable row level security;
 
@@ -153,23 +119,6 @@ create table if not exists public.paycheck_history (
   unique (source_transaction_id)
 );
 
-create or replace function public.set_paycheck_history_updated_at()
-returns trigger
-language plpgsql
-as $function$
-begin
-  new.updated_at = timezone('utc', now());
-  return new;
-end;
-$function$;
-
-drop trigger if exists set_paycheck_history_updated_at on public.paycheck_history;
-
-create trigger set_paycheck_history_updated_at
-before update on public.paycheck_history
-for each row
-execute function public.set_paycheck_history_updated_at();
-
 alter table public.paycheck_history enable row level security;
 
 create table if not exists public.budget_assignments (
@@ -182,23 +131,6 @@ create table if not exists public.budget_assignments (
   updated_at timestamptz not null default timezone('utc', now()),
   unique (user_id, month_key, item_key)
 );
-
-create or replace function public.set_budget_assignments_updated_at()
-returns trigger
-language plpgsql
-as $function$
-begin
-  new.updated_at = timezone('utc', now());
-  return new;
-end;
-$function$;
-
-drop trigger if exists set_budget_assignments_updated_at on public.budget_assignments;
-
-create trigger set_budget_assignments_updated_at
-before update on public.budget_assignments
-for each row
-execute function public.set_budget_assignments_updated_at();
 
 alter table public.budget_assignments enable row level security;
 

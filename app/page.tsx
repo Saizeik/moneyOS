@@ -113,6 +113,7 @@ type PaycheckHistoryRow = {
 
 type MobileTab = "home" | "budget" | "spending" | "bills" | "plan";
 type WorkspaceDensity = "comfortable" | "compact";
+type RecommendationStyle = "conservative" | "balanced" | "aggressive_savings";
 type IconName =
   | "home"
   | "budget"
@@ -473,6 +474,11 @@ function normalizeMerchantName(value: string | null | undefined) {
   return (value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function categoryMatches(value: string, keywords: string[]) {
+  const normalized = value.trim().toLowerCase();
+  return keywords.some((keyword) => normalized.includes(keyword));
+}
+
 function detectRecurringCadence(transactions: Transaction[]) {
   if (transactions.length < 3) return null;
 
@@ -697,6 +703,13 @@ function getCurrentPaycheckReserveAmount(
   }
 
   return dueDate <= nextPayday ? amount : 0;
+}
+
+function formatPaydayShort(date: Date) {
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function getPaycheckStorageKey(userId: string | null) {
@@ -1023,6 +1036,11 @@ export default function Home() {
   const [activeMobileTab, setActiveMobileTab] = useState<MobileTab>("home");
   const [workspaceDensity, setWorkspaceDensity] =
     useState<WorkspaceDensity>("comfortable");
+  const [recommendationStyle, setRecommendationStyle] =
+    useState<RecommendationStyle>("balanced");
+  const [expandedTransactions, setExpandedTransactions] = useState<
+    Record<string, boolean>
+  >({});
   const [netWorthAssetsInput, setNetWorthAssetsInput] = useState("");
   const [netWorthDebtsInput, setNetWorthDebtsInput] = useState("");
   const [newSavingsGoalName, setNewSavingsGoalName] = useState("");
@@ -1856,6 +1874,110 @@ export default function Home() {
     setTransactionCountsAsPaycheck(true);
   };
 
+  const toggleTransactionExpanded = (transactionId: string) => {
+    setExpandedTransactions((current) => ({
+      ...current,
+      [transactionId]: !current[transactionId],
+    }));
+  };
+
+  const updateTransactionField = (
+    transactionId: string,
+    field: keyof Pick<
+      Transaction,
+      | "category"
+      | "merchant"
+      | "memo"
+      | "account_id"
+      | "transaction_date"
+      | "transaction_type"
+      | "amount"
+    >,
+    value: string
+  ) => {
+    setTransactions((currentTransactions) =>
+      currentTransactions.map((transaction) =>
+        transaction.id === transactionId
+          ? {
+              ...transaction,
+              [field]:
+                field === "amount"
+                  ? Math.abs(Number(value === "" ? 0 : value))
+                  : field === "account_id"
+                    ? value || null
+                    : field === "merchant" || field === "memo" || field === "transaction_date"
+                      ? value || null
+                      : value,
+            }
+          : transaction
+      )
+    );
+  };
+
+  const saveTransaction = async (transaction: Transaction) => {
+    const payload = {
+      amount: Math.abs(Number(transaction.amount || 0)),
+      category: transaction.category.trim() || "Uncategorized",
+      merchant: transaction.merchant?.trim() || null,
+      memo: transaction.memo?.trim() || null,
+      account_id: transaction.account_id || null,
+      transaction_date: transaction.transaction_date || null,
+      transaction_type: getTransactionType(transaction),
+    };
+
+    const { data, error } = await supabase
+      .from("transactions")
+      .update(payload)
+      .eq("id", transaction.id)
+      .select()
+      .single();
+
+    if (error) {
+      logSupabaseError("Failed to save transaction", error, {
+        transactionId: transaction.id,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    if (data) {
+      setTransactions((currentTransactions) =>
+        currentTransactions.map((currentTransaction) =>
+          currentTransaction.id === data.id ? data : currentTransaction
+        )
+      );
+    }
+
+    setSyncError(null);
+    pushToast("Transaction updated.");
+  };
+
+  const deleteTransaction = async (transactionId: string) => {
+    const { error } = await supabase
+      .from("transactions")
+      .delete()
+      .eq("id", transactionId);
+
+    if (error) {
+      logSupabaseError("Failed to delete transaction", error, {
+        transactionId,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    setTransactions((currentTransactions) =>
+      currentTransactions.filter((transaction) => transaction.id !== transactionId)
+    );
+    setExpandedTransactions((current) => {
+      const next = { ...current };
+      delete next[transactionId];
+      return next;
+    });
+    setSyncError(null);
+    pushToast("Transaction deleted.", "info");
+  };
+
   const updateMainBalance = async () => {
     if (!userId || !bankBalanceInput) return;
 
@@ -2488,6 +2610,59 @@ export default function Home() {
     pushToast("Category saved.");
   };
 
+  const deleteCategory = async (categoryId: string) => {
+    const linkedSavingsGoals = savingsGoals.filter(
+      (goal) => goal.linked_category_id === categoryId
+    );
+
+    if (linkedSavingsGoals.length > 0) {
+      const { error: unlinkError } = await supabase
+        .from("savings")
+        .update({ linked_category_id: null })
+        .eq("linked_category_id", categoryId);
+
+      if (unlinkError) {
+        logSupabaseError("Failed to unlink savings goal from category", unlinkError, {
+          categoryId,
+        });
+        setSyncError(getErrorMessage(unlinkError));
+        return;
+      }
+
+      setSavingsGoals((current) =>
+        current.map((goal) =>
+          goal.linked_category_id === categoryId
+            ? { ...goal, linked_category_id: null }
+            : goal
+        )
+      );
+    }
+
+    const { error } = await supabase
+      .from("budget_categories")
+      .delete()
+      .eq("id", categoryId);
+
+    if (error) {
+      logSupabaseError("Failed to delete category", error, {
+        categoryId,
+      });
+      setSyncError(getErrorMessage(error));
+      return;
+    }
+
+    setCategories((current) =>
+      current.filter((category) => category.id !== categoryId)
+    );
+
+    const nextAssignments = { ...assignedBudget };
+    delete nextAssignments[`category:${categoryId}`];
+    void commitAssignedBudget(nextAssignments);
+
+    setSyncError(null);
+    pushToast("Category deleted.", "info");
+  };
+
   const updateBudgetItemTarget = (itemKey: string, value: string) => {
     const amount = Math.max(0, Number(value || 0));
 
@@ -2544,6 +2719,37 @@ export default function Home() {
     };
 
     void commitAssignedBudget(nextAssignments);
+  };
+
+  const applyRecommendedCategoryTarget = async (
+    categoryId: string,
+    recommendedAmount: number
+  ) => {
+    const category = categories.find((entry) => entry.id === categoryId);
+    if (!category) return;
+
+    const nextCategory = {
+      ...category,
+      monthly_limit: recommendedAmount,
+    };
+
+    setCategories((current) =>
+      current.map((entry) =>
+        entry.id === categoryId ? nextCategory : entry
+      )
+    );
+
+    await saveCategory(nextCategory);
+  };
+
+  const applyAllRecommendedBudgetSplits = async () => {
+    for (const recommendation of recommendedBudgetSplits) {
+      await applyRecommendedCategoryTarget(
+        recommendation.id,
+        recommendation.recommended
+      );
+    }
+    pushToast("Recommended budget splits applied.");
   };
 
   const toggleDebtExpanded = (debtId: string) => {
@@ -2686,6 +2892,13 @@ export default function Home() {
   const nextPayday = getNextPayday(
     effectivePaycheckSettings,
     now,
+    receivedPaycheckToday
+  );
+  const upcomingPaydays = getPaydaysThroughDate(
+    effectivePaycheckSettings,
+    now,
+    addMonths(now, 3),
+    6,
     receivedPaycheckToday
   );
   const daysUntilNextPayday = nextPayday ? diffInDays(now, nextPayday) : null;
@@ -2910,12 +3123,40 @@ export default function Home() {
   );
   const fixedBillsTotal = bills.reduce((sum, bill) => sum + Number(bill.amount || 0), 0);
   const monthlyPlannedGap = monthlyIncome - fixedBillsTotal;
+  const rentBillAmount =
+    bills.find((bill) => categoryMatches(`${bill.name} ${bill.category}`, ["rent"]))?.amount ||
+    categories.find((category) => categoryMatches(category.name, ["rent"]))?.monthly_limit ||
+    0;
+  const householdCommittedMonthly = categories
+    .filter((category) =>
+      categoryMatches(
+        `${category.name} ${category.group_name}`,
+        ["kids", "family", "household", "child", "baby", "school", "home"]
+      ) &&
+      !categoryMatches(category.name, ["grocer", "transport", "gas", "fuel", "food", "eat"])
+    )
+    .reduce((sum, category) => sum + Number(category.monthly_limit || 0), 0);
+  const flexibleBudgetPool = Math.max(
+    monthlyIncome - fixedBillsTotal - householdCommittedMonthly,
+    0
+  );
+  const rentBurden = monthlyIncome > 0 ? rentBillAmount / monthlyIncome : 0;
   const billBudgetItems = bills
     .map((bill) => {
       const key = `bill:${bill.id}`;
       const target = Number(bill.amount || 0);
       const assigned = Number(assignedBudget[key] || 0);
       const dueDate = getNextDueDate(Number(bill.due_day || 1), now);
+      const paychecksBeforeDue =
+        (bill.split_across_paychecks ?? false) && dueDate
+          ? getPaydaysThroughDate(
+              effectivePaycheckSettings,
+              now,
+              dueDate,
+              6,
+              receivedPaycheckToday
+            )
+          : [];
       const reserveAmount = getCurrentPaycheckReserveAmount(
         target,
         dueDate,
@@ -2935,13 +3176,14 @@ export default function Home() {
         target,
         assigned,
         reserveAmount,
+        paychecksBeforeDue,
         dueDate,
         activity: 0,
         available: assigned,
         needed: Math.max(target - assigned, 0),
         detail:
           isSplitBill
-            ? `${formatCurrency(reserveAmount)} to set aside this paycheck • ${formatCurrency(Math.max(target - assigned, 0))} total still needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`
+            ? `${formatCurrency(reserveAmount)} per paycheck across ${Math.max(paychecksBeforeDue.length, 1)} paycheck${Math.max(paychecksBeforeDue.length, 1) === 1 ? "" : "s"} • ${formatCurrency(Math.max(target - assigned, 0))} total still needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`
             : target > 0
             ? `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${bill.due_day}${getDaySuffix(Number(bill.due_day))}`
             : `No target set for the ${bill.due_day}${getDaySuffix(Number(bill.due_day))} due date.`,
@@ -2960,6 +3202,16 @@ export default function Home() {
         category.target_day && category.target_day > 0
           ? getNextDueDate(Number(category.target_day), now)
           : null;
+      const paychecksBeforeTarget =
+        (category.split_across_paychecks ?? false) && targetDate
+          ? getPaydaysThroughDate(
+              effectivePaycheckSettings,
+              now,
+              targetDate,
+              6,
+              receivedPaycheckToday
+            )
+          : [];
       const reserveAmount =
         (category.split_across_paychecks ?? false) && targetDate
           ? getCurrentPaycheckReserveAmount(
@@ -2986,6 +3238,7 @@ export default function Home() {
         targetDay: category.target_day ?? null,
         targetDate,
         reserveAmount,
+        paychecksBeforeTarget,
         reservesBeforePayday,
         activity,
         available: assigned - activity,
@@ -2995,7 +3248,7 @@ export default function Home() {
           category.target_day &&
           reserveAmount > 0 &&
           reserveAmount < target
-            ? `${formatCurrency(reserveAmount)} to set aside this paycheck • ${formatCurrency(Math.max(target - assigned, 0))} total still needed by the ${category.target_day}${getDaySuffix(Number(category.target_day))}`
+            ? `${formatCurrency(reserveAmount)} per paycheck across ${Math.max(paychecksBeforeTarget.length, 1)} paycheck${Math.max(paychecksBeforeTarget.length, 1) === 1 ? "" : "s"} • ${formatCurrency(Math.max(target - assigned, 0))} total still needed by the ${category.target_day}${getDaySuffix(Number(category.target_day))}`
             : category.target_day && category.target_day > 0
             ? `${formatCurrency(Math.max(target - assigned, 0))} more needed by the ${category.target_day}${getDaySuffix(Number(category.target_day))}`
             : `${formatCurrency(Math.max(target - assigned, 0))} more needed this month`,
@@ -3026,6 +3279,105 @@ export default function Home() {
     (sum, item) => sum + item.needed,
     0
   );
+  const recommendedBudgetSplits = useMemo(() => {
+    const groceryCategory = categories.find((category) =>
+      categoryMatches(category.name, ["grocer", "food"])
+    );
+    const eatingOutCategory = categories.find((category) =>
+      categoryMatches(category.name, ["eating", "dining", "restaurant", "takeout"])
+    );
+    const transportCategory = categories.find((category) =>
+      categoryMatches(category.name, ["transport", "gas", "fuel"])
+    );
+
+    const burdenAdjustment = rentBurden >= 0.38 ? -0.02 : rentBurden <= 0.25 ? 0.02 : 0;
+    const styleProfile =
+      recommendationStyle === "conservative"
+        ? {
+            grocery: 0.22,
+            food: 0.1,
+            transport: 0.08,
+          }
+        : recommendationStyle === "aggressive_savings"
+          ? {
+              grocery: 0.18,
+              food: 0.06,
+              transport: 0.06,
+            }
+          : {
+              grocery: 0.2,
+              food: 0.08,
+              transport: 0.07,
+            };
+    const groceryShare = Math.min(
+      Math.max(styleProfile.grocery + burdenAdjustment, 0.15),
+      0.25
+    );
+    const foodShare = Math.min(
+      Math.max(styleProfile.food + burdenAdjustment / 2, 0.04),
+      0.11
+    );
+    const transportShare = Math.min(
+      Math.max(styleProfile.transport + burdenAdjustment / 2, 0.05),
+      0.1
+    );
+
+    const buildRecommendation = (
+      category: BudgetCategory | undefined,
+      label: string,
+      share: number,
+      floor: number,
+      ceiling: number,
+      rationale: string
+    ) => {
+      if (!category) return null;
+
+      const recommended = Math.round(
+        Math.min(Math.max(flexibleBudgetPool * share, floor), ceiling)
+      );
+
+      return {
+        id: category.id,
+        label,
+        current: Number(category.monthly_limit || 0),
+        recommended,
+        rationale,
+      };
+    };
+
+    return [
+      buildRecommendation(
+        groceryCategory,
+        groceryCategory?.name || "Groceries",
+        groceryShare,
+        250,
+        900,
+        `Uses about ${Math.round(groceryShare * 100)}% of your flexible monthly pool after fixed bills and household commitments.`
+      ),
+      buildRecommendation(
+        eatingOutCategory,
+        eatingOutCategory?.name || "Eating Out",
+        foodShare,
+        60,
+        300,
+        `Keeps dining flexible without crowding groceries when rent is ${Math.round(rentBurden * 100)}% of income.`
+      ),
+      buildRecommendation(
+        transportCategory,
+        transportCategory?.name || "Transportation",
+        transportShare,
+        60,
+        350,
+        `Leaves room for gas and transportation after rent and current family/household targets.`
+      ),
+    ].filter(Boolean) as Array<{
+      id: string;
+      label: string;
+      current: number;
+      recommended: number;
+      rationale: string;
+    }>;
+  }, [categories, flexibleBudgetPool, recommendationStyle, rentBurden]);
   const spendingCategoryRows = categoryRows.filter(
     (cat) =>
       cat.group_name !== "Fixed Bills" &&
@@ -3153,6 +3505,12 @@ export default function Home() {
               day: "numeric",
             })
           : "--",
+        countedPaydaysLabel:
+          bill.paychecksBeforeDue?.length > 0
+            ? bill.paychecksBeforeDue
+                .map((payday: Date) => formatPaydayShort(payday))
+                .join(" • ")
+            : null,
         reserveLabel:
           Number(bill.reserveAmount || 0) > 0 &&
           Number(bill.reserveAmount || 0) < Number(bill.target || 0)
@@ -3957,6 +4315,118 @@ export default function Home() {
             </div>
           </div>
 
+          <div className="mt-4 rounded-2xl border border-slate-800 bg-black/25 p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm text-slate-300">Recommended Budget Splits</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Uses income, rent, fixed bills, and existing family/household targets to suggest monthly amounts for groceries, food, and gas.
+                </p>
+              </div>
+              {recommendedBudgetSplits.length > 0 ? (
+                <ActionButton
+                  onClick={() => void applyAllRecommendedBudgetSplits()}
+                  tone="ghost"
+                  className="shrink-0 px-3 py-2 text-xs"
+                >
+                  Apply All
+                </ActionButton>
+              ) : null}
+            </div>
+
+            <div className="mt-3 grid gap-3">
+              <div className="grid gap-2 md:grid-cols-3">
+                <button
+                  onClick={() => setRecommendationStyle("conservative")}
+                  className={
+                    recommendationStyle === "conservative"
+                      ? "rounded-xl border border-cyan-400 bg-cyan-400/12 px-3 py-2 text-xs uppercase tracking-[0.16em] text-cyan-200"
+                      : "rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs uppercase tracking-[0.16em] text-slate-400"
+                  }
+                >
+                  Conservative
+                </button>
+                <button
+                  onClick={() => setRecommendationStyle("balanced")}
+                  className={
+                    recommendationStyle === "balanced"
+                      ? "rounded-xl border border-cyan-400 bg-cyan-400/12 px-3 py-2 text-xs uppercase tracking-[0.16em] text-cyan-200"
+                      : "rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs uppercase tracking-[0.16em] text-slate-400"
+                  }
+                >
+                  Balanced
+                </button>
+                <button
+                  onClick={() => setRecommendationStyle("aggressive_savings")}
+                  className={
+                    recommendationStyle === "aggressive_savings"
+                      ? "rounded-xl border border-cyan-400 bg-cyan-400/12 px-3 py-2 text-xs uppercase tracking-[0.16em] text-cyan-200"
+                      : "rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs uppercase tracking-[0.16em] text-slate-400"
+                  }
+                >
+                  Aggressive Savings
+                </button>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <MetricCard
+                  label="Flexible Pool"
+                  value={formatCurrency(flexibleBudgetPool)}
+                  density={workspaceDensity}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail="Income left after fixed bills and household commitments"
+                />
+                <MetricCard
+                  label="Rent Load"
+                  value={`${Math.round(rentBurden * 100)}%`}
+                  density={workspaceDensity}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail={formatCurrency(rentBillAmount)}
+                />
+                <MetricCard
+                  label="Household / Kids"
+                  value={formatCurrency(householdCommittedMonthly)}
+                  density={workspaceDensity}
+                  valueClassName="mt-2 text-2xl text-slate-50"
+                  detail="Already factored into the split"
+                />
+              </div>
+
+              {recommendedBudgetSplits.length > 0 ? (
+                recommendedBudgetSplits.map((recommendation) => (
+                  <div
+                    key={`recommended-${recommendation.id}`}
+                    className="rounded-xl border border-slate-800 bg-slate-950/35 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm text-slate-50">{recommendation.label}</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Current {formatCurrency(recommendation.current)} • Recommended {formatCurrency(recommendation.recommended)}
+                        </p>
+                        <p className="mt-2 text-xs text-slate-400">{recommendation.rationale}</p>
+                      </div>
+                      <ActionButton
+                        onClick={() =>
+                          void applyRecommendedCategoryTarget(
+                            recommendation.id,
+                            recommendation.recommended
+                          )
+                        }
+                        className="shrink-0 px-3 py-2 text-xs"
+                      >
+                        Apply
+                      </ActionButton>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <EmptyState>
+                  Add categories like Groceries, Eating Out, Dining, Transportation, or Gas to receive tailored split recommendations.
+                </EmptyState>
+              )}
+            </div>
+          </div>
+
           <div className="mt-3 flex gap-2">
             <button
               onClick={autoAssignRemaining}
@@ -4127,6 +4597,26 @@ export default function Home() {
                   {upcomingBillsBeforePayday.length} reserved item{upcomingBillsBeforePayday.length === 1 ? "" : "s"}
                 </p>
               </div>
+            </div>
+
+            <div className="rounded-xl border border-gray-800 bg-black/20 p-3">
+              <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Next paydays</p>
+              {upcomingPaydays.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {upcomingPaydays.slice(0, 6).map((payday, index) => (
+                    <span
+                      key={`future-payday-${payday.toISOString()}-${index}`}
+                      className="rounded-full border border-cyan-400/25 bg-cyan-400/10 px-3 py-1 text-xs text-cyan-100"
+                    >
+                      {formatPaydayShort(payday)}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-gray-500">
+                  Set your pay schedule to preview future paydays.
+                </p>
+              )}
             </div>
 
             <div className="rounded-xl border border-gray-800 bg-black/20 p-3">
@@ -4328,6 +4818,16 @@ export default function Home() {
                     <div key={item.key} className="rounded-xl bg-[#0A0F1C] p-3">
                       {(() => {
                         const isManagedBill = item.key.startsWith("bill:");
+                        const splitPaydayLabel =
+                          "paychecksBeforeDue" in item && item.paychecksBeforeDue?.length
+                            ? item.paychecksBeforeDue
+                                .map((payday: Date) => formatPaydayShort(payday))
+                                .join(" • ")
+                            : "paychecksBeforeTarget" in item && item.paychecksBeforeTarget?.length
+                              ? item.paychecksBeforeTarget
+                                  .map((payday: Date) => formatPaydayShort(payday))
+                                  .join(" • ")
+                              : null;
 
                         return (
                           <>
@@ -4335,6 +4835,11 @@ export default function Home() {
                         <div>
                           <p>{item.name}</p>
                           <p className="text-xs text-gray-400">{item.detail}</p>
+                          {splitPaydayLabel ? (
+                            <p className="mt-1 text-[11px] text-cyan-300">
+                              Counted paydays: {splitPaydayLabel}
+                            </p>
+                          ) : null}
                           {"targetDay" in item ? (
                             <p
                               className={
@@ -4936,6 +5441,13 @@ export default function Home() {
                   className="mt-3 w-full rounded-lg"
                 >
                   Save Category Budget
+                </ActionButton>
+                <ActionButton
+                  onClick={() => void deleteCategory(category.id)}
+                  tone="danger"
+                  className="mt-2 w-full rounded-lg"
+                >
+                  Delete Category
                 </ActionButton>
               </div>
             ))}
@@ -5659,58 +6171,174 @@ export default function Home() {
 
           <div className="mt-3 space-y-2">
             {transactions.slice(0, 8).map((tx) => (
-              <div key={tx.id} className="flex items-center justify-between rounded-xl bg-black/20 px-3 py-2 text-sm">
-                <div>
-                  <p className="text-slate-50">
-                    {tx.merchant?.trim() || tx.category}
-                  </p>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    {(() => {
-                      const cadence = tx.merchant
-                        ? detectRecurringCadence(
-                            merchantHistory.get(normalizeMerchantName(tx.merchant))
-                              ?.transactions || []
-                          )
-                        : null;
+              <div key={tx.id} className="rounded-xl bg-black/20 px-3 py-3 text-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-slate-50">
+                      {tx.merchant?.trim() || tx.category}
+                    </p>
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      {(() => {
+                        const cadence = tx.merchant
+                          ? detectRecurringCadence(
+                              merchantHistory.get(normalizeMerchantName(tx.merchant))
+                                ?.transactions || []
+                            )
+                          : null;
 
-                      return cadence ? (
-                        <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-cyan-200">
-                          {cadence}
+                        return cadence ? (
+                          <span className="rounded-full border border-cyan-400/30 bg-cyan-400/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-cyan-200">
+                            {cadence}
+                          </span>
+                        ) : null;
+                      })()}
+                      {tx.merchant ? (
+                        <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-slate-400">
+                          remembered
                         </span>
-                      ) : null;
-                    })()}
-                    {tx.merchant ? (
-                      <span className="rounded-full border border-slate-700 bg-slate-900/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.14em] text-slate-400">
-                        remembered
-                      </span>
+                      ) : null}
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {tx.category}
+                      {tx.account_id
+                        ? ` • ${accounts.find((account) => account.id === tx.account_id)?.name || "Account"}`
+                        : ""}
+                    </p>
+                    {tx.memo ? (
+                      <p className="text-xs text-gray-500">{tx.memo}</p>
                     ) : null}
+                    <p className="text-xs text-gray-500">
+                      {getTransactionDate(tx).toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                      })}
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-400">
-                    {tx.category}
-                    {tx.account_id
-                      ? ` • ${accounts.find((account) => account.id === tx.account_id)?.name || "Account"}`
-                      : ""}
-                  </p>
-                  {tx.memo ? (
-                    <p className="text-xs text-gray-500">{tx.memo}</p>
-                  ) : null}
-                  <p className="text-xs text-gray-500">
-                    {getTransactionDate(tx).toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                    })}
-                  </p>
+                  <div className="text-right">
+                    <span
+                      className={
+                        getTransactionType(tx) === "income"
+                          ? "text-emerald-300"
+                          : "text-red-300"
+                      }
+                    >
+                      {getTransactionType(tx) === "income" ? "+" : "-"}
+                      {formatCurrency(Math.abs(Number(tx.amount || 0)))}
+                    </span>
+                    <div className="mt-2">
+                      <ActionButton
+                        onClick={() => toggleTransactionExpanded(tx.id)}
+                        tone="ghost"
+                        className="px-3 py-1 text-xs"
+                      >
+                        {expandedTransactions[tx.id] ? "Close" : "Edit"}
+                      </ActionButton>
+                    </div>
+                  </div>
                 </div>
-                <span
-                  className={
-                    getTransactionType(tx) === "income"
-                      ? "text-emerald-300"
-                      : "text-red-300"
-                  }
-                >
-                  {getTransactionType(tx) === "income" ? "+" : "-"}
-                  {formatCurrency(Math.abs(Number(tx.amount || 0)))}
-                </span>
+
+                {expandedTransactions[tx.id] ? (
+                  <div className="mt-3 grid gap-2 border-t border-slate-800 pt-3">
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <FieldLabel label="Merchant / Source">
+                        <input
+                          value={tx.merchant || ""}
+                          onChange={(e) =>
+                            updateTransactionField(tx.id, "merchant", e.target.value)
+                          }
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </FieldLabel>
+                      <FieldLabel label="Amount">
+                        <input
+                          value={String(tx.amount)}
+                          onChange={(e) =>
+                            updateTransactionField(tx.id, "amount", e.target.value)
+                          }
+                          type="number"
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </FieldLabel>
+                      <FieldLabel label="Category">
+                        <select
+                          value={tx.category}
+                          onChange={(e) =>
+                            updateTransactionField(tx.id, "category", e.target.value)
+                          }
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        >
+                          {categories.map((category) => (
+                            <option key={`tx-category-${category.id}`} value={category.name}>
+                              {category.name}
+                            </option>
+                          ))}
+                        </select>
+                      </FieldLabel>
+                      <FieldLabel label="Account">
+                        <select
+                          value={tx.account_id || ""}
+                          onChange={(e) =>
+                            updateTransactionField(tx.id, "account_id", e.target.value)
+                          }
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        >
+                          <option value="">No account</option>
+                          {accounts.map((account) => (
+                            <option key={`tx-account-${account.id}`} value={account.id}>
+                              {account.name}
+                            </option>
+                          ))}
+                        </select>
+                      </FieldLabel>
+                      <FieldLabel label="Date">
+                        <input
+                          value={tx.transaction_date || formatInputDate(getTransactionDate(tx))}
+                          onChange={(e) =>
+                            updateTransactionField(tx.id, "transaction_date", e.target.value)
+                          }
+                          type="date"
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        />
+                      </FieldLabel>
+                      <FieldLabel label="Type">
+                        <select
+                          value={getTransactionType(tx)}
+                          onChange={(e) =>
+                            updateTransactionField(tx.id, "transaction_type", e.target.value)
+                          }
+                          className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                        >
+                          <option value="expense">Expense</option>
+                          <option value="income">Income</option>
+                        </select>
+                      </FieldLabel>
+                    </div>
+                    <FieldLabel label="Memo">
+                      <textarea
+                        value={tx.memo || ""}
+                        onChange={(e) =>
+                          updateTransactionField(tx.id, "memo", e.target.value)
+                        }
+                        rows={2}
+                        className="w-full rounded-xl bg-[#0A0F1C] border border-gray-700 p-3"
+                      />
+                    </FieldLabel>
+                    <div className="flex gap-2">
+                      <ActionButton
+                        onClick={() => void saveTransaction(tx)}
+                        className="flex-1"
+                      >
+                        Save Transaction
+                      </ActionButton>
+                      <ActionButton
+                        onClick={() => void deleteTransaction(tx.id)}
+                        tone="danger"
+                      >
+                        Delete
+                      </ActionButton>
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ))}
             {transactions.length === 0 ? (

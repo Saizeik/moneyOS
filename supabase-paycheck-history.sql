@@ -14,12 +14,12 @@ create table if not exists public.paycheck_history (
 create or replace function public.set_paycheck_history_updated_at()
 returns trigger
 language plpgsql
-as $function$
+as '
 begin
-  new.updated_at = timezone('utc', now());
+  new.updated_at = timezone(''utc'', now());
   return new;
 end;
-$function$;
+';
 
 drop trigger if exists set_paycheck_history_updated_at on public.paycheck_history;
 
