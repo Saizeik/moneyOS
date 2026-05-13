@@ -454,7 +454,11 @@ function getTransactionType(transaction: Transaction) {
 }
 
 function getTransactionDate(transaction: Transaction) {
-  return new Date(transaction.transaction_date || transaction.created_at);
+  return (
+    parseStoredDate(transaction.transaction_date) ||
+    parseStoredDate(transaction.created_at) ||
+    new Date()
+  );
 }
 
 function getTransactionSignedAmount(transaction: Transaction) {
@@ -555,6 +559,17 @@ function startOfDay(date: Date) {
 function parseLocalDate(value: string) {
   if (!value) return null;
   const parsed = new Date(`${value}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function parseStoredDate(value?: string | null) {
+  if (!value) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return parseLocalDate(value);
+  }
+
+  const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
@@ -961,6 +976,10 @@ const OVESPENDING_KEYWORDS = [
   "food",
   "grocery",
   "groceries",
+  "gas",
+  "fuel",
+  "transport",
+  "transportation",
   "dining",
   "eating",
   "restaurant",
@@ -1318,7 +1337,8 @@ export default function Home() {
       setPaycheckHistory((current) =>
         [data as PaycheckHistoryRow, ...current].sort(
           (a, b) =>
-            new Date(b.received_date).getTime() - new Date(a.received_date).getTime()
+            (parseStoredDate(b.received_date)?.getTime() || 0) -
+            (parseStoredDate(a.received_date)?.getTime() || 0)
         )
       );
     }
@@ -2241,7 +2261,8 @@ export default function Home() {
       const nextHistory = [data, ...netWorthHistory]
         .sort(
           (a, b) =>
-            new Date(b.snapshot_date).getTime() - new Date(a.snapshot_date).getTime()
+            (parseStoredDate(b.snapshot_date)?.getTime() || 0) -
+            (parseStoredDate(a.snapshot_date)?.getTime() || 0)
         )
         .slice(0, 8);
       setNetWorthHistory(nextHistory);
@@ -2886,7 +2907,9 @@ export default function Home() {
   );
   const receivedPaycheckToday = Boolean(
     latestReceivedPaycheck &&
-      startOfDay(new Date(latestReceivedPaycheck.received_date)).getTime() ===
+      startOfDay(
+        parseStoredDate(latestReceivedPaycheck.received_date) || new Date()
+      ).getTime() ===
         startOfDay(now).getTime()
   );
   const nextPayday = getNextPayday(
@@ -2976,9 +2999,14 @@ export default function Home() {
   const overspendingDefense = categoryRows
     .map((cat) => {
       const categoryName = `${cat.name} ${cat.group_name}`.toLowerCase();
+      const groupName = String(cat.group_name || "").toLowerCase();
       const keywordMatch = OVESPENDING_KEYWORDS.some((keyword) =>
         categoryName.includes(keyword)
       );
+      const discretionaryGroupMatch =
+        groupName.includes("overspending") ||
+        groupName.includes("wants") ||
+        groupName.includes("flexible");
       const weeklyRisk =
         Number(cat.weekly_limit || 0) > 0
           ? Number(cat.weeklySpent || 0) / Number(cat.weekly_limit || 1)
@@ -2993,8 +3021,13 @@ export default function Home() {
             (Number(cat.monthly_limit || 0) * now.getDate()) /
               Math.max(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(), 1)
           : 0;
+      const activeBudgetCategory =
+        (Number(cat.weekly_limit || 0) > 0 || Number(cat.monthly_limit || 0) > 0) &&
+        (Number(cat.weeklySpent || 0) > 0 || Number(cat.monthlySpent || 0) > 0);
       const riskScore =
         (keywordMatch ? 1.25 : 0) +
+        (discretionaryGroupMatch ? 0.75 : 0) +
+        (activeBudgetCategory ? 0.4 : 0) +
         weeklyRisk * 1.4 +
         monthlyRisk +
         (monthlyPaceOverrun > 0 ? 0.4 : 0);
@@ -3007,6 +3040,8 @@ export default function Home() {
       return {
         ...cat,
         keywordMatch,
+        discretionaryGroupMatch,
+        activeBudgetCategory,
         weeklyRisk,
         monthlyRisk,
         monthlyPaceOverrun,
@@ -3017,7 +3052,8 @@ export default function Home() {
     .filter(
       (cat) =>
         cat.keywordMatch ||
-        cat.group_name === "Overspending Defense" ||
+        cat.discretionaryGroupMatch ||
+        cat.activeBudgetCategory ||
         cat.weeklyRisk >= 0.6 ||
         cat.monthlyRisk >= 0.6
     )
@@ -4558,7 +4594,9 @@ export default function Home() {
                 <p className="text-xs uppercase tracking-[0.18em] text-gray-500">Last paycheck</p>
                 <p className="mt-2 text-lg text-slate-50">
                   {latestReceivedPaycheck
-                    ? new Date(latestReceivedPaycheck.received_date).toLocaleDateString("en-US", {
+                    ? (
+                        parseStoredDate(latestReceivedPaycheck.received_date) || new Date()
+                      ).toLocaleDateString("en-US", {
                         month: "short",
                         day: "numeric",
                         year: "numeric",
@@ -4955,8 +4993,11 @@ export default function Home() {
           </div>
         </section>
 
-        <section className={`${mobileSectionClass("bills")} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
-          <p className="text-sm text-gray-400">Update Bank Balance</p>
+        <section className={`${mobileSectionClass(["home", "bills"])} rounded-[1.75rem] border border-slate-700/80 bg-[#111827]/92 p-4 shadow-[0_12px_40px_rgba(0,0,0,0.22)] 2xl:col-span-4 space-y-3`}>
+          <p className="text-sm text-gray-400">Cash Account Balance</p>
+          <p className="text-xs text-gray-500">
+            Keep this current so your flexible cash, safe pace, and bill timing stay accurate.
+          </p>
           <input
             value={bankBalanceInput}
             onChange={(e) => setBankBalanceInput(e.target.value)}
@@ -6138,7 +6179,9 @@ export default function Home() {
                         />
                       </div>
                       <p className="text-[10px] text-gray-500">
-                        {new Date(snapshot.snapshot_date).toLocaleDateString("en-US", {
+                        {(
+                          parseStoredDate(snapshot.snapshot_date) || new Date()
+                        ).toLocaleDateString("en-US", {
                           month: "short",
                           day: "numeric",
                         })}
