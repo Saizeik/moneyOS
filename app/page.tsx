@@ -474,6 +474,48 @@ function getTransactionExpenseAmount(transaction: Transaction) {
     : 0;
 }
 
+function getDebtPaymentCategory(
+  categories: BudgetCategory[],
+  debtName: string
+) {
+  const normalizedDebtName = debtName.trim().toLowerCase();
+  const exactMatch = categories.find(
+    (category) => category.name.trim().toLowerCase() === normalizedDebtName
+  );
+
+  if (exactMatch) {
+    return exactMatch.name;
+  }
+
+  const debtGroupMatch = categories.find(
+    (category) => category.group_name.trim().toLowerCase() === "debt"
+  );
+
+  if (debtGroupMatch) {
+    return debtGroupMatch.name;
+  }
+
+  const creditCardPaymentsMatch = categories.find(
+    (category) =>
+      category.name.trim().toLowerCase() === "credit card payments"
+  );
+
+  if (creditCardPaymentsMatch) {
+    return creditCardPaymentsMatch.name;
+  }
+
+  const genericDebtMatch = categories.find((category) => {
+    const normalizedCategoryName = category.name.trim().toLowerCase();
+    return (
+      normalizedCategoryName.includes("debt") ||
+      normalizedCategoryName.includes("credit") ||
+      normalizedCategoryName.includes("loan")
+    );
+  });
+
+  return genericDebtMatch?.name || "Debt Payment";
+}
+
 function normalizeMerchantName(value: string | null | undefined) {
   return (value || "").trim().toLowerCase().replace(/\s+/g, " ");
 }
@@ -2394,6 +2436,11 @@ export default function Home() {
 
   const saveDebt = async (debt: Debt) => {
     const trimmedName = debt.name.trim();
+    const existingDebt = debts.find((currentDebt) => currentDebt.id === debt.id);
+    const priorBalance = Number(existingDebt?.balance || 0);
+    const nextBalance = Number(debt.balance || 0);
+    const reductionAmount =
+      priorBalance > nextBalance ? Number((priorBalance - nextBalance).toFixed(2)) : 0;
 
     if (!trimmedName) {
       setSyncError("Debt name is required.");
@@ -2428,10 +2475,46 @@ export default function Home() {
         syncExpandedDebtState(nextDebts);
         return nextDebts;
       });
+
+      if (reductionAmount > 0 && userId) {
+        const debtPaymentCategory = getDebtPaymentCategory(categories, trimmedName);
+        const debtPaymentDate = formatInputDate(new Date());
+        const debtPaymentPayload = {
+          amount: reductionAmount,
+          category: debtPaymentCategory,
+          merchant: trimmedName,
+          memo: `Debt reduced from ${formatCurrency(priorBalance)} to ${formatCurrency(nextBalance)}`,
+          account_id: accounts[0]?.id || null,
+          transaction_date: debtPaymentDate,
+          transaction_type: "expense" as const,
+          user_id: userId,
+        };
+
+        const { data: debtPaymentTx, error: debtPaymentError } = await supabase
+          .from("transactions")
+          .insert([debtPaymentPayload])
+          .select()
+          .single();
+
+        if (debtPaymentError) {
+          logSupabaseError("Failed to record debt payoff transaction", debtPaymentError, {
+            debtId: debt.id,
+            reductionAmount,
+            debtPaymentCategory,
+          });
+          pushToast("Debt updated, but payoff transaction could not be recorded.", "warning");
+        } else if (debtPaymentTx) {
+          setTransactions((currentTransactions) => [debtPaymentTx, ...currentTransactions]);
+        }
+      }
     }
 
     setSyncError(null);
-    pushToast("Debt updated.");
+    pushToast(
+      reductionAmount > 0
+        ? `Debt updated and ${formatCurrency(reductionAmount)} recorded in spending.`
+        : "Debt updated."
+    );
   };
 
   const deleteDebt = async (debtId: string) => {
@@ -2965,6 +3048,7 @@ export default function Home() {
   );
 
   const categoryRows = categories.map((cat) => {
+    const assignedAmount = Number(assignedBudget[`category:${cat.id}`] || 0);
     const weeklySpent = weeklyTransactions
       .filter((tx) => tx.category === cat.name)
       .reduce((sum, tx) => sum + getTransactionExpenseAmount(tx), 0);
@@ -2973,12 +3057,20 @@ export default function Home() {
       .filter((tx) => tx.category === cat.name)
       .reduce((sum, tx) => sum + getTransactionExpenseAmount(tx), 0);
 
-    const weeklyRemaining = Number(cat.weekly_limit) - weeklySpent;
-    const monthlyRemaining = Number(cat.monthly_limit) - monthlySpent;
+    const monthlyTarget = Number(cat.monthly_limit || 0);
+    const effectiveMonthlyBudget =
+      assignedAmount > 0 ? assignedAmount : monthlyTarget;
+    const effectiveWeeklyBudget =
+      assignedAmount > 0
+        ? Math.max(effectiveMonthlyBudget / Math.max(getDaysRemainingInMonth(now) / 7, 1), 0)
+        : Number(cat.weekly_limit || 0);
+    const weeklyRemaining = effectiveWeeklyBudget - weeklySpent;
+    const monthlyRemaining = effectiveMonthlyBudget - monthlySpent;
+    const fundedRemaining = Math.max(effectiveMonthlyBudget - monthlySpent, 0);
 
     const weeklyPercent =
-      Number(cat.weekly_limit) > 0
-        ? (weeklySpent / Number(cat.weekly_limit)) * 100
+      effectiveWeeklyBudget > 0
+        ? (weeklySpent / effectiveWeeklyBudget) * 100
         : 0;
 
     let status = "SAFE";
@@ -2989,8 +3081,13 @@ export default function Home() {
       ...cat,
       weeklySpent,
       monthlySpent,
+      assignedAmount,
+      monthlyTarget,
+      effectiveMonthlyBudget,
+      effectiveWeeklyBudget,
       weeklyRemaining,
       monthlyRemaining,
+      fundedRemaining,
       weeklyPercent,
       status,
     };
@@ -3008,17 +3105,17 @@ export default function Home() {
         groupName.includes("wants") ||
         groupName.includes("flexible");
       const weeklyRisk =
-        Number(cat.weekly_limit || 0) > 0
-          ? Number(cat.weeklySpent || 0) / Number(cat.weekly_limit || 1)
+        Number(cat.effectiveWeeklyBudget || 0) > 0
+          ? Number(cat.weeklySpent || 0) / Number(cat.effectiveWeeklyBudget || 1)
           : 0;
       const monthlyRisk =
-        Number(cat.monthly_limit || 0) > 0
-          ? Number(cat.monthlySpent || 0) / Number(cat.monthly_limit || 1)
+        Number(cat.effectiveMonthlyBudget || 0) > 0
+          ? Number(cat.monthlySpent || 0) / Number(cat.effectiveMonthlyBudget || 1)
           : 0;
       const monthlyPaceOverrun =
-        Number(cat.monthly_limit || 0) > 0
+        Number(cat.effectiveMonthlyBudget || 0) > 0
           ? Number(cat.monthlySpent || 0) -
-            (Number(cat.monthly_limit || 0) * now.getDate()) /
+            (Number(cat.effectiveMonthlyBudget || 0) * now.getDate()) /
               Math.max(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate(), 1)
           : 0;
       const activeBudgetCategory =
